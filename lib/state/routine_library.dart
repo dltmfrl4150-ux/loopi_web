@@ -144,6 +144,20 @@ class RoutineLibrary extends ChangeNotifier {
     notifyListeners();
   }
 
+  Future<void> deletePracticeResult(String id) async {
+    _practiceResults.removeWhere((result) => result.id == id);
+    await _persist();
+    notifyListeners();
+  }
+
+  Future<void> deleteManyPracticeResults(Iterable<String> ids) async {
+    final idSet = ids.toSet();
+    if (idSet.isEmpty) return;
+    _practiceResults.removeWhere((result) => idSet.contains(result.id));
+    await _persist();
+    notifyListeners();
+  }
+
   Future<void> createGroup({required String name, required List<String> routineIds}) async {
     final unique = routineIds
         .where((id) => id.isNotEmpty)

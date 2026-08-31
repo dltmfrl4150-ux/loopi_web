@@ -199,6 +199,8 @@ class PracticeResult {
     required this.createdAt,
     this.recordedPath,
     this.recordedDataBytes,
+    this.startTime = 0,
+    this.endTime = 0,
   });
 
   final String id;
@@ -207,6 +209,8 @@ class PracticeResult {
   final DateTime createdAt;
   final String? recordedPath;
   final List<int>? recordedDataBytes;
+  final double startTime;
+  final double endTime;
 
   factory PracticeResult.fromJson(Map<String, dynamic> json) {
     return PracticeResult(
@@ -218,6 +222,8 @@ class PracticeResult {
       recordedDataBytes: json['recordedDataBytes'] is String
           ? base64Decode(json['recordedDataBytes'] as String)
           : null,
+      startTime: (json['startTime'] as num?)?.toDouble() ?? 0,
+      endTime: (json['endTime'] as num?)?.toDouble() ?? 0,
     );
   }
 
@@ -228,6 +234,8 @@ class PracticeResult {
         'createdAt': createdAt.toIso8601String(),
         'recordedPath': recordedPath,
         'recordedDataBytes': recordedDataBytes == null ? null : base64Encode(recordedDataBytes!),
+        'startTime': startTime,
+        'endTime': endTime,
       };
 }
 

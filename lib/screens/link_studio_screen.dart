@@ -82,6 +82,8 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
   Timer? _delayTimer;
   DateTime? _ignoreLoopUntil;
   DateTime? _lastSeekAt;
+  // Guards the position listener while a forced seek/segment-switch is in flight.
+  bool _isLoopTransitioning = false;
   String _videoUrl = kDefaultVideoUrl;
   String _videoId = 'M7lc1UVf-VE';
   RangeValues? _rangeBeforeDrag;
@@ -94,6 +96,7 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
   bool _audioLoading = false;
   double? _activePlaybackStart;
   double? _activePlaybackEnd;
+  bool _showClipboardBanner = true;
 
   bool get _inWidgetTest =>
       WidgetsBinding.instance.runtimeType.toString().contains('TestWidgetsFlutterBinding');
@@ -313,6 +316,26 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
     }
   }
 
+  void _onTimeChanged(String value, int index, bool isStart) {
+    // Only commit if the value looks like a valid time format to avoid invalid intermediate states
+    if (value.isEmpty) return;
+    
+    // Try to parse as time format (mm:ss or m:ss)
+    final parts = value.split(':');
+    if (parts.length == 2) {
+      try {
+        final minutes = int.parse(parts[0]);
+        final seconds = int.parse(parts[1]);
+        if (minutes >= 0 && seconds >= 0 && seconds < 60) {
+          // Valid time format, commit the change
+          _commitTimeField(index: index, isStart: isStart);
+        }
+      } catch (_) {
+        // Invalid format, don't commit
+      }
+    }
+  }
+
   Future<void> _seekTo(double seconds, {bool force = false}) async {
     if (_inWidgetTest) return;
     final now = DateTime.now();
@@ -497,6 +520,8 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
   }
 
   Future<void> _checkClipboardForDetectedLink() async {
+    if (!_showClipboardBanner) return;
+    
     final clipboardData = await Clipboard.getData(Clipboard.kTextPlain);
     final text = clipboardData?.text?.trim();
     if (text == null || text.isEmpty) return;
@@ -511,15 +536,38 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
-        content: Text('${'link_studio.detected_copied_link'.tr()} ${'studio.load'.tr()}'),
+        content: Row(
+          children: [
+            Expanded(
+              child: Text('link_studio.detected_copied_link'.tr()),
+            ),
+            IconButton(
+              icon: const Icon(Icons.close, size: 16),
+              onPressed: () {
+                ScaffoldMessenger.of(context).hideCurrentSnackBar();
+                setState(() => _showClipboardBanner = false);
+              },
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(),
+            ),
+          ],
+        ),
         action: SnackBarAction(
           label: 'studio.load'.tr(),
           onPressed: () {
             _loadUrl();
           },
         ),
+        duration: const Duration(seconds: 10),
+        onVisible: () {
+          // Banner is now visible
+        },
       ),
-    );
+    ).closed.then((_) {
+      if (mounted) {
+        setState(() => _showClipboardBanner = false);
+      }
+    });
   }
 
   @override
@@ -560,15 +608,23 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
       await _stopTestPlayback();
       return;
     }
-    _session.beginTest(startIndex: _session.selectedIndex);
+    final startIndex = _session.selectedIndex.clamp(0, _session.segments.length - 1);
+    _session.selectSegment(startIndex);
+    _session.beginTest(startIndex: startIndex);
     _highlightedSection = _session.testSegmentIndex;
     _delayPending = false;
-    _ignoreLoopUntil = DateTime.now().add(const Duration(milliseconds: 400));
     final first = _session.testSegment;
     _activePlaybackStart = first.startSec;
     _activePlaybackEnd = first.endSec;
+
+    // Force playback to the exact start of the selected segment: pause first so the
+    // position listener can't observe a stale "reached end" position mid-seek, and
+    // block the listener entirely until the seek has actually completed.
+    _isLoopTransitioning = true;
+    await _pause();
     await _applySpeed(first.speed);
     await _seekTo(first.startSec, force: true);
+    _isLoopTransitioning = false;
     if (!_inWidgetTest) {
       await _play();
     }
@@ -585,6 +641,7 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
 
   void _handleTestTime(double time) {
     if (!_session.isTesting || _delayPending) return;
+    if (_isLoopTransitioning) return;
     final now = DateTime.now();
     if (_ignoreLoopUntil != null && now.isBefore(_ignoreLoopUntil!)) return;
     final segment = _session.testSegment;
@@ -611,10 +668,13 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
     _highlightedSection = _session.testSegmentIndex;
     _activePlaybackStart = _session.testSegment.startSec;
     _activePlaybackEnd = _session.testSegment.endSec;
+    _isLoopTransitioning = true;
+    await _pause();
     if (result == LoopHitResult.nextSegment) {
       await _applySpeed(_session.testSegment.speed);
     }
     await _seekTo(_session.testSegment.startSec, force: true);
+    _isLoopTransitioning = false;
     if (!_inWidgetTest) {
       await _play();
     }
@@ -1060,22 +1120,35 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
                 builder: (context) {
                   final testing = _session.isTesting;
                   final active = testing ? i == _highlightedSection : i == _session.selectedIndex;
-                  return ChoiceChip(
-                    label: Text(sectionLabelForIndex(i)),
-                    selected: active,
-                    showCheckmark: !testing,
-                    selectedColor: testing
-                        ? LoopiColors.deepPurple
-                        : LoopiColors.purple.withValues(alpha: 0.18),
-                    labelStyle: TextStyle(
-                      color: testing && active
-                          ? Colors.white
-                          : active
-                              ? LoopiColors.purpleDark
-                              : LoopiColors.ink,
-                      fontWeight: FontWeight.w700,
-                    ),
-                    onSelected: testing ? null : (_) => _selectRow(i),
+                  return Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      ChoiceChip(
+                        label: Text(sectionLabelForIndex(i)),
+                        selected: active,
+                        showCheckmark: !testing,
+                        selectedColor: testing
+                            ? LoopiColors.deepPurple
+                            : LoopiColors.purple.withValues(alpha: 0.18),
+                        labelStyle: TextStyle(
+                          color: testing && active
+                              ? Colors.white
+                              : active
+                                  ? LoopiColors.purpleDark
+                                  : LoopiColors.ink,
+                          fontWeight: FontWeight.w700,
+                        ),
+                        onSelected: testing ? null : (_) => _selectRow(i),
+                      ),
+                      if (i != 0 && !testing)
+                        IconButton(
+                          icon: const Icon(Icons.close, size: 16),
+                          onPressed: () => _session.removeSegment(i),
+                          padding: EdgeInsets.zero,
+                          constraints: const BoxConstraints(),
+                          tooltip: '삭제',
+                        ),
+                    ],
                   );
                 },
               ),
@@ -1266,7 +1339,7 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
         DataCell(
           IconButton(
             tooltip: 'Delete section',
-            onPressed: testing || _session.segments.length <= 1
+            onPressed: testing || index == 0 || _session.segments.length <= 1
                 ? null
                 : () => _session.removeSegment(index),
             icon: const Icon(Icons.delete_outline, color: Colors.redAccent),
@@ -1300,6 +1373,7 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
         },
         onSubmitted: (_) => _commitTimeField(index: index, isStart: isStart),
         onEditingComplete: () => _commitTimeField(index: index, isStart: isStart),
+        onChanged: (value) => _onTimeChanged(value, index, isStart),
       ),
     );
   }

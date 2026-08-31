@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -55,6 +56,7 @@ class _PracticeModeScreenState extends State<PracticeModeScreen> {
   bool _delayPending = false;
   Completer<void>? _delayCompleter;
   bool _isPlaying = false;
+  bool _isSeeking = false;
   String? _mediaObjectUrl;
 
   bool get _inWidgetTest =>
@@ -71,8 +73,9 @@ class _PracticeModeScreenState extends State<PracticeModeScreen> {
     super.initState();
     _playlistIndex = _playlist.indexWhere((routine) => routine.id == widget.routine.id);
     if (_playlistIndex < 0) _playlistIndex = 0;
+    _segmentIndex = 0;
     _playsRemaining = _currentRoutine.segments.first.loopCount;
-    
+
     _initializePlayer();
     
     _countdownTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
@@ -90,61 +93,79 @@ class _PracticeModeScreenState extends State<PracticeModeScreen> {
   }
 
   Future<void> _initializePlayer() async {
-    switch (_currentRoutine.sourceType) {
-      case SourceType.youtube:
-        if (_inWidgetTest) break;
-        _youtubePlayer = YoutubePlayerController.fromVideoId(
-          videoId: _currentRoutine.videoId,
-          autoPlay: false,
-          startSeconds: _currentRoutine.segments.first.startSec,
-          params: const YoutubePlayerParams(
-            mute: false,
-            showFullscreenButton: true,
-            showControls: true,
-            loop: false,
-          ),
-        );
-        _youtubeInitialized = true;
-        _stateSub = _youtubePlayer.videoStateStream.listen((state) {
-          if (!_ready) return;
-          _onTime(state.position.inMilliseconds / 1000.0);
-        });
-        break;
-      case SourceType.localVideo:
-        if (_currentRoutine.localFilePath != null && !kIsWeb) {
-          _videoPlayer = VideoPlayerController.file(File(_currentRoutine.localFilePath!));
-          await _videoPlayer!.initialize();
-          _videoPlayer!.addListener(_onVideoPlayerUpdate);
-        } else if (_currentRoutine.localDataBytes != null) {
-          _mediaObjectUrl = createMediaBlobUrl(_currentRoutine.localDataBytes!, 'video/mp4');
-          final uri = _mediaObjectUrl == null
-              ? Uri.dataFromBytes(_currentRoutine.localDataBytes!, mimeType: 'video/mp4')
-              : Uri.parse(_mediaObjectUrl!);
-          _videoPlayer = VideoPlayerController.networkUrl(uri);
-          await _videoPlayer!.initialize();
-          _videoPlayer!.addListener(_onVideoPlayerUpdate);
-        } else if (_currentRoutine.localFilePath != null) {
-          _videoPlayer = VideoPlayerController.networkUrl(Uri.parse(_currentRoutine.localFilePath!));
-          await _videoPlayer!.initialize();
-          _videoPlayer!.addListener(_onVideoPlayerUpdate);
-        }
-        break;
-      case SourceType.audio:
-        if (_currentRoutine.localFilePath != null || _currentRoutine.localDataBytes != null) {
-          _audioPlayer = AudioPlayer();
-          if (_currentRoutine.localFilePath != null && !kIsWeb) {
-            await _audioPlayer!.setSourceDeviceFile(_currentRoutine.localFilePath!);
-          } else if (_currentRoutine.localDataBytes != null) {
-            await _audioPlayer!.setSourceBytes(Uint8List.fromList(_currentRoutine.localDataBytes!));
-          } else {
-            await _audioPlayer!.setSourceUrl(_currentRoutine.localFilePath!);
-          }
-          _audioPlayer!.onPositionChanged.listen((position) {
+    try {
+      switch (_currentRoutine.sourceType) {
+        case SourceType.youtube:
+          if (_inWidgetTest) break;
+          _youtubePlayer = YoutubePlayerController.fromVideoId(
+            videoId: _currentRoutine.videoId,
+            autoPlay: false,
+            startSeconds: _currentRoutine.segments.first.startSec,
+            params: const YoutubePlayerParams(
+              mute: false,
+              showFullscreenButton: true,
+              showControls: true,
+              loop: false,
+            ),
+          );
+          _youtubeInitialized = true;
+          _stateSub = _youtubePlayer.videoStateStream.listen((state) {
             if (!_ready) return;
-            _onTime(position.inMilliseconds / 1000.0);
+            _onTime(state.position.inMilliseconds / 1000.0);
           });
-        }
-        break;
+          break;
+        case SourceType.localVideo:
+          if (_currentRoutine.localFilePath != null && !kIsWeb) {
+            _videoPlayer = VideoPlayerController.file(File(_currentRoutine.localFilePath!));
+            await Future.any([
+              _videoPlayer!.initialize(),
+              Future.delayed(const Duration(seconds: 30), () => throw Exception('Video initialization timeout')),
+            ]);
+            _videoPlayer!.addListener(_onVideoPlayerUpdate);
+          } else if (_currentRoutine.localDataBytes != null) {
+            _mediaObjectUrl = createMediaBlobUrl(_currentRoutine.localDataBytes!, 'video/mp4');
+            final uri = _mediaObjectUrl == null
+                ? Uri.dataFromBytes(_currentRoutine.localDataBytes!, mimeType: 'video/mp4')
+                : Uri.parse(_mediaObjectUrl!);
+            _videoPlayer = VideoPlayerController.networkUrl(uri);
+            await Future.any([
+              _videoPlayer!.initialize(),
+              Future.delayed(const Duration(seconds: 30), () => throw Exception('Video initialization timeout')),
+            ]);
+            _videoPlayer!.addListener(_onVideoPlayerUpdate);
+          } else if (_currentRoutine.localFilePath != null) {
+            _videoPlayer = VideoPlayerController.networkUrl(Uri.parse(_currentRoutine.localFilePath!));
+            await Future.any([
+              _videoPlayer!.initialize(),
+              Future.delayed(const Duration(seconds: 30), () => throw Exception('Video initialization timeout')),
+            ]);
+            _videoPlayer!.addListener(_onVideoPlayerUpdate);
+          }
+          break;
+        case SourceType.audio:
+          if (_currentRoutine.localFilePath != null || _currentRoutine.localDataBytes != null) {
+            _audioPlayer = AudioPlayer();
+            if (_currentRoutine.localFilePath != null && !kIsWeb) {
+              await _audioPlayer!.setSourceDeviceFile(_currentRoutine.localFilePath!);
+            } else if (_currentRoutine.localDataBytes != null) {
+              await _audioPlayer!.setSourceBytes(Uint8List.fromList(_currentRoutine.localDataBytes!));
+            } else {
+              await _audioPlayer!.setSourceUrl(_currentRoutine.localFilePath!);
+            }
+            _audioPlayer!.onPositionChanged.listen((position) {
+              if (!_ready) return;
+              _onTime(position.inMilliseconds / 1000.0);
+            });
+          }
+          break;
+      }
+    } catch (error) {
+      // Log error but don't crash the app
+      print('Player initialization error: $error');
+      // Ensure loading state is cleared even on error
+      if (mounted) {
+        setState(() => _ready = true);
+      }
     }
   }
 
@@ -159,15 +180,19 @@ class _PracticeModeScreenState extends State<PracticeModeScreen> {
     _playlistIndex = index;
     _segmentIndex = 0;
     _playsRemaining = _currentRoutine.segments.first.loopCount;
-    _ignoreUntil = DateTime.now().add(const Duration(milliseconds: 400));
+    _ignoreUntil = DateTime.now().add(const Duration(milliseconds: 600));
+    _isSeeking = true;
     setState(() {});
     if (_inWidgetTest) return;
-    
+
     try {
       switch (_currentRoutine.sourceType) {
         case SourceType.youtube:
           await _youtubePlayer.loadVideoById(videoId: _currentRoutine.videoId);
+          await _youtubePlayer.setPlaybackRate(_currentRoutine.segments.first.speed);
           await _youtubePlayer.seekTo(seconds: _currentRoutine.segments.first.startSec, allowSeekAhead: true);
+          await Future<void>.delayed(const Duration(milliseconds: 120));
+          _isSeeking = false;
           if (immediate) {
             await _youtubePlayer.playVideo();
             _isPlaying = true;
@@ -189,7 +214,10 @@ class _PracticeModeScreenState extends State<PracticeModeScreen> {
               _videoPlayer = VideoPlayerController.networkUrl(Uri.parse(_currentRoutine.localFilePath!));
             }
             await _videoPlayer!.initialize();
+            await _videoPlayer!.setPlaybackSpeed(_currentRoutine.segments.first.speed);
             await _videoPlayer!.seekTo(Duration(milliseconds: (_currentRoutine.segments.first.startSec * 1000).toInt()));
+            await Future<void>.delayed(const Duration(milliseconds: 120));
+            _isSeeking = false;
             if (immediate) {
               await _videoPlayer!.play();
               _isPlaying = true;
@@ -208,7 +236,10 @@ class _PracticeModeScreenState extends State<PracticeModeScreen> {
             } else {
               await _audioPlayer!.setSourceUrl(_currentRoutine.localFilePath!);
             }
+            await _audioPlayer!.setPlaybackRate(_currentRoutine.segments.first.speed);
             await _audioPlayer!.seek(Duration(milliseconds: (_currentRoutine.segments.first.startSec * 1000).toInt()));
+            await Future<void>.delayed(const Duration(milliseconds: 120));
+            _isSeeking = false;
             if (immediate) {
               await _audioPlayer!.resume();
               _isPlaying = true;
@@ -216,11 +247,13 @@ class _PracticeModeScreenState extends State<PracticeModeScreen> {
           }
           break;
       }
-    } catch (_) {}
-    
+    } catch (_) {
+      _isSeeking = false;
+    }
+
     _pollTimer?.cancel();
     _pollTimer = Timer.periodic(const Duration(milliseconds: 120), (_) async {
-      if (!_ready) return;
+      if (!_ready || _isSeeking) return;
       try {
         final time = await _getCurrentTime();
         _onTime(time);
@@ -246,7 +279,8 @@ class _PracticeModeScreenState extends State<PracticeModeScreen> {
     if (index < 0 || index >= _currentRoutine.segments.length) return;
     _segmentIndex = index;
     _playsRemaining = _currentRoutine.segments[index].loopCount;
-    _ignoreUntil = DateTime.now().add(const Duration(milliseconds: 400));
+    _ignoreUntil = DateTime.now().add(const Duration(milliseconds: 500));
+    _isSeeking = true;
     setState(() {});
     if (_inWidgetTest) return;
     try {
@@ -254,26 +288,34 @@ class _PracticeModeScreenState extends State<PracticeModeScreen> {
         case SourceType.youtube:
           await _youtubePlayer.setPlaybackRate(_currentRoutine.segments[index].speed);
           await _youtubePlayer.seekTo(seconds: _currentRoutine.segments[index].startSec, allowSeekAhead: true);
+          await Future<void>.delayed(const Duration(milliseconds: 120));
+          _isSeeking = false;
           await _youtubePlayer.playVideo();
           _isPlaying = true;
           break;
         case SourceType.localVideo:
           await _videoPlayer?.setPlaybackSpeed(_currentRoutine.segments[index].speed);
           await _videoPlayer?.seekTo(Duration(milliseconds: (_currentRoutine.segments[index].startSec * 1000).toInt()));
+          await Future<void>.delayed(const Duration(milliseconds: 120));
+          _isSeeking = false;
           await _videoPlayer?.play();
           _isPlaying = true;
           break;
         case SourceType.audio:
           await _audioPlayer?.setPlaybackRate(_currentRoutine.segments[index].speed);
           await _audioPlayer?.seek(Duration(milliseconds: (_currentRoutine.segments[index].startSec * 1000).toInt()));
+          await Future<void>.delayed(const Duration(milliseconds: 120));
+          _isSeeking = false;
           await _audioPlayer?.resume();
           _isPlaying = true;
           break;
       }
-    } catch (_) {}
+    } catch (_) {
+      _isSeeking = false;
+    }
     _pollTimer?.cancel();
     _pollTimer = Timer.periodic(const Duration(milliseconds: 120), (_) async {
-      if (!_ready) return;
+      if (!_ready || _isSeeking) return;
       try {
         final time = await _getCurrentTime();
         _onTime(time);
@@ -374,9 +416,13 @@ class _PracticeModeScreenState extends State<PracticeModeScreen> {
   }
 
   void _onTime(double time) {
-    if (!_ready || _delayPending) return;
+    if (!_ready || _delayPending || _isSeeking) return;
     if (_ignoreUntil != null && DateTime.now().isBefore(_ignoreUntil!)) return;
-    if (time + 0.12 < _segment.endSec) return;
+
+    final segmentStart = _segment.startSec;
+    final segmentEnd = _segment.endSec;
+    if (time < segmentStart - 0.1) return;
+    if (time + 0.12 < segmentEnd) return;
 
     _ignoreUntil = DateTime.now().add(const Duration(days: 1));
     final delaySec = _segment.delaySec;
@@ -416,30 +462,46 @@ class _PracticeModeScreenState extends State<PracticeModeScreen> {
     }
   }
 
-  void _replayCurrent() {
+  Future<void> _replayCurrent() async {
     _ignoreUntil = DateTime.now().add(const Duration(milliseconds: 280));
     if (_inWidgetTest) return;
-    
-    switch (_currentRoutine.sourceType) {
-      case SourceType.youtube:
-        _youtubePlayer.seekTo(seconds: _segment.startSec, allowSeekAhead: true);
-        _youtubePlayer.playVideo();
-        break;
-      case SourceType.localVideo:
-        _videoPlayer?.seekTo(Duration(milliseconds: (_segment.startSec * 1000).toInt()));
-        _videoPlayer?.play();
-        break;
-      case SourceType.audio:
-        _audioPlayer?.seek(Duration(milliseconds: (_segment.startSec * 1000).toInt()));
-        _audioPlayer?.resume();
-        break;
-    }
+    _isSeeking = true;
+    try {
+      switch (_currentRoutine.sourceType) {
+        case SourceType.youtube:
+          await _youtubePlayer.setPlaybackRate(_segment.speed);
+          await _youtubePlayer.seekTo(seconds: _segment.startSec, allowSeekAhead: true);
+          break;
+        case SourceType.localVideo:
+          await _videoPlayer?.setPlaybackSpeed(_segment.speed);
+          await _videoPlayer?.seekTo(Duration(milliseconds: (_segment.startSec * 1000).toInt()));
+          break;
+        case SourceType.audio:
+          await _audioPlayer?.setPlaybackRate(_segment.speed);
+          await _audioPlayer?.seek(Duration(milliseconds: (_segment.startSec * 1000).toInt()));
+          break;
+      }
+    } catch (_) {}
+    _isSeeking = false;
+    try {
+      switch (_currentRoutine.sourceType) {
+        case SourceType.youtube:
+          await _youtubePlayer.playVideo();
+          break;
+        case SourceType.localVideo:
+          await _videoPlayer?.play();
+          break;
+        case SourceType.audio:
+          await _audioPlayer?.resume();
+          break;
+      }
+    } catch (_) {}
   }
 
   Future<void> _replayWithDelay(int delaySec) async {
     await _waitDelay(delaySec);
     if (!_ready) return;
-    _replayCurrent();
+    await _replayCurrent();
   }
 
   Future<void> _startSegmentWithDelay(int index, int delaySec) async {

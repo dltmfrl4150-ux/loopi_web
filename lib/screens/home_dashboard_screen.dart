@@ -11,6 +11,7 @@ import '../widgets/favorite_icon_button.dart';
 import 'link_studio_screen.dart';
 import 'practice_mode_screen.dart';
 import 'practice_screen.dart';
+import 'routine_player_screen.dart';
 
 enum SelectionMode { none, group, delete }
 
@@ -164,6 +165,21 @@ class _HomeDashboardScreenState extends State<HomeDashboardScreen> {
     });
   }
 
+  void _openRoutinePlayer(SavedRoutine routine) {
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => RoutinePlayerScreen(
+          routine: routine,
+          library: widget.library,
+        ),
+      ),
+    );
+  }
+
+  void _openLibraryTab() {
+    setState(() => _tabIndex = 4);
+  }
+
   void _openPracticeView(Widget view) {
     setState(() {
       _selectedPracticeRoutine = null;
@@ -220,6 +236,8 @@ class _HomeDashboardScreenState extends State<HomeDashboardScreen> {
               onStartRoutine: _startRoutine,
               onCreateVideoRoutine: _pickVideoFile,
               onCreateAudioRoutine: _pickAudioFile,
+              onOpenRoutinePlayer: _openRoutinePlayer,
+              onViewAll: _openLibraryTab,
             ),
             LinkStudioScreen(library: widget.library, embedded: true),
             CommunityFeedScreen(
@@ -238,6 +256,7 @@ class _HomeDashboardScreenState extends State<HomeDashboardScreen> {
               onShareRoutine: _shareRoutine,
               onFavorite: (routine, value) => _communityFeed.toggleFavorite(routine, value, widget.library, context),
               onOpenPracticeView: _openPracticeView,
+              onOpenRoutinePlayer: _openRoutinePlayer,
             ),
           ],
         ),
@@ -286,6 +305,8 @@ class _HomeTab extends StatelessWidget {
     required this.onStartRoutine,
     required this.onCreateVideoRoutine,
     required this.onCreateAudioRoutine,
+    required this.onOpenRoutinePlayer,
+    required this.onViewAll,
   });
 
   final RoutineLibrary library;
@@ -293,6 +314,8 @@ class _HomeTab extends StatelessWidget {
   final ValueChanged<SavedRoutine> onStartRoutine;
   final VoidCallback onCreateVideoRoutine;
   final VoidCallback onCreateAudioRoutine;
+  final ValueChanged<SavedRoutine> onOpenRoutinePlayer;
+  final VoidCallback onViewAll;
 
   @override
   Widget build(BuildContext context) {
@@ -344,7 +367,7 @@ class _HomeTab extends StatelessWidget {
                 fontWeight: FontWeight.w700,
               ),
             ),
-            TextButton(onPressed: () {}, child: Text('home.view_all'.tr())),
+            TextButton(onPressed: onViewAll, child: Text('home.view_all'.tr())),
           ],
         ),
         const SizedBox(height: 8),
@@ -361,7 +384,8 @@ class _HomeTab extends StatelessWidget {
                     padding: const EdgeInsets.only(bottom: 10),
                     child: _RoutineCard(
                       routine: routine,
-                      onStart: () => onStartRoutine(routine),
+                      library: library,
+                      onStart: () => onOpenRoutinePlayer(routine),
                     ),
                   ),
               ],
@@ -616,6 +640,7 @@ class _RoutineCard extends StatelessWidget {
   const _RoutineCard({
     required this.routine,
     required this.onStart,
+    required this.library,
     this.isSelected = false,
     this.onTap,
     this.onShare,
@@ -624,6 +649,7 @@ class _RoutineCard extends StatelessWidget {
 
   final SavedRoutine routine;
   final VoidCallback onStart;
+  final RoutineLibrary library;
   final bool isSelected;
   final VoidCallback? onTap;
   final VoidCallback? onShare;
@@ -717,14 +743,40 @@ class _RoutineCard extends StatelessWidget {
                 onChanged: (value) => onFavorite!(value),
               ),
             if (onTap == null)
-              FilledButton(
-                onPressed: onStart,
-                style: FilledButton.styleFrom(
-                  backgroundColor: LoopiColors.purple,
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                  visualDensity: VisualDensity.compact,
-                ),
-                child: Text('home.start_practice'.tr()),
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  FilledButton(
+                    onPressed: onStart,
+                    style: FilledButton.styleFrom(
+                      backgroundColor: LoopiColors.purple,
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                      visualDensity: VisualDensity.compact,
+                    ),
+                    child: const Text('Play'),
+                  ),
+                  const SizedBox(width: 4),
+                  OutlinedButton(
+                    onPressed: () {
+                      // Navigate to practice screen
+                      final parentContext = context;
+                      Navigator.of(parentContext).push(
+                        MaterialPageRoute<void>(
+                          builder: (_) => PracticeScreen(
+                            library: library,
+                            selectedRoutine: routine,
+                          ),
+                        ),
+                      );
+                    },
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: LoopiColors.purple,
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                      visualDensity: VisualDensity.compact,
+                    ),
+                    child: const Text('Practice'),
+                  ),
+                ],
               ),
           ],
         ),
@@ -740,6 +792,7 @@ class _LibraryTab extends StatefulWidget {
     required this.onShareRoutine,
     required this.onFavorite,
     required this.onOpenPracticeView,
+    required this.onOpenRoutinePlayer,
   });
 
   final RoutineLibrary library;
@@ -747,6 +800,7 @@ class _LibraryTab extends StatefulWidget {
   final ValueChanged<SavedRoutine> onShareRoutine;
   final void Function(SavedRoutine routine, bool value) onFavorite;
   final ValueChanged<Widget> onOpenPracticeView;
+  final ValueChanged<SavedRoutine> onOpenRoutinePlayer;
 
   @override
   State<_LibraryTab> createState() => _LibraryTabState();
@@ -779,6 +833,17 @@ class _LibraryTabState extends State<_LibraryTab> {
       _selectionMode = SelectionMode.none;
       _selectedIds.clear();
     });
+  }
+
+  void _openRoutinePlayer(SavedRoutine routine) {
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => RoutinePlayerScreen(
+          routine: routine,
+          library: widget.library,
+        ),
+      ),
+    );
   }
 
   Future<void> _handleGroupConfirm() async {
@@ -836,7 +901,27 @@ class _LibraryTabState extends State<_LibraryTab> {
     );
     
     if (confirmed == true) {
-      widget.library.deleteMany(_selectedIds);
+      // Separate routine IDs from practice result IDs
+      final routineIds = <String>[];
+      final practiceResultIds = <String>[];
+      
+      for (final id in _selectedIds) {
+        if (id.startsWith('practice_')) {
+          practiceResultIds.add(id);
+        } else {
+          routineIds.add(id);
+        }
+      }
+      
+      // Delete routines
+      if (routineIds.isNotEmpty) {
+        widget.library.deleteMany(routineIds.toSet());
+      }
+      
+      // Delete practice results
+      if (practiceResultIds.isNotEmpty) {
+        widget.library.deleteManyPracticeResults(practiceResultIds.toSet());
+      }
     }
     _exitSelectionMode();
   }
@@ -924,11 +1009,32 @@ class _LibraryTabState extends State<_LibraryTab> {
                   if (_librarySection == 2)
                     for (final result in widget.library.practiceResults)
                       ListTile(
-                        leading: const Icon(Icons.video_library_outlined),
+                        leading: _selectionMode != SelectionMode.none
+                            ? Checkbox(
+                                value: _selectedIds.contains(result.id),
+                                onChanged: (value) {
+                                  if (value == true) {
+                                    _selectedIds.add(result.id);
+                                  } else {
+                                    _selectedIds.remove(result.id);
+                                  }
+                                  setState(() {});
+                                },
+                              )
+                            : const Icon(Icons.video_library_outlined),
                         title: Text(result.name),
                         subtitle: Text('연습 기록 · ${result.createdAt.toLocal()}'),
-                        trailing: const Icon(Icons.chevron_right),
+                        trailing: _selectionMode == SelectionMode.none ? const Icon(Icons.chevron_right) : null,
                         onTap: () {
+                          if (_selectionMode != SelectionMode.none) {
+                            if (_selectedIds.contains(result.id)) {
+                              _selectedIds.remove(result.id);
+                            } else {
+                              _selectedIds.add(result.id);
+                            }
+                            setState(() {});
+                            return;
+                          }
                           final routine = widget.library.byId(result.routineId);
                           if (routine != null) {
                             widget.onOpenPracticeView(
@@ -948,7 +1054,8 @@ class _LibraryTabState extends State<_LibraryTab> {
                         padding: const EdgeInsets.only(bottom: 10),
                         child: _RoutineCard(
                           routine: routine,
-                          onStart: () => widget.onStartRoutine(routine),
+                          library: widget.library,
+                          onStart: () => widget.onOpenRoutinePlayer(routine),
                           onFavorite: (value) => widget.onFavorite(routine, value),
                         ),
                       ),
@@ -1002,6 +1109,8 @@ class _LibraryTabState extends State<_LibraryTab> {
                       },
                       onOpenRoutine: widget.onStartRoutine,
                       onShareRoutine: widget.onShareRoutine,
+                      onOpenRoutinePlayer: _openRoutinePlayer,
+                      library: widget.library,
                     ),
                   if (ungrouped.isNotEmpty) ...[
                     const SizedBox(height: 6),
@@ -1019,7 +1128,8 @@ class _LibraryTabState extends State<_LibraryTab> {
                         padding: const EdgeInsets.only(bottom: 10),
                         child: _RoutineCard(
                           routine: routine,
-                          onStart: () => widget.onStartRoutine(routine),
+                          library: widget.library,
+                          onStart: () => _openRoutinePlayer(routine),
                           onShare: () => widget.onShareRoutine(routine),
                           onFavorite: (value) => widget.onFavorite(routine, value),
                           isSelected: _selectedIds.contains(routine.id),
@@ -1051,6 +1161,8 @@ class _RoutineGroupCard extends StatefulWidget {
     required this.onPlayGroup,
     required this.onOpenRoutine,
     required this.onShareRoutine,
+    required this.onOpenRoutinePlayer,
+    required this.library,
   });
 
   final RoutineGroup group;
@@ -1062,6 +1174,8 @@ class _RoutineGroupCard extends StatefulWidget {
   final VoidCallback onPlayGroup;
   final ValueChanged<SavedRoutine> onOpenRoutine;
   final ValueChanged<SavedRoutine> onShareRoutine;
+  final ValueChanged<SavedRoutine> onOpenRoutinePlayer;
+  final RoutineLibrary library;
 
   @override
   State<_RoutineGroupCard> createState() => _RoutineGroupCardState();
@@ -1144,7 +1258,8 @@ class _RoutineGroupCardState extends State<_RoutineGroupCard> {
                     ),
                     child: _RoutineCard(
                       routine: routine,
-                      onStart: () => widget.onOpenRoutine(routine),
+                      library: widget.library,
+                      onStart: () => widget.onOpenRoutinePlayer(routine),
                       onShare: () => widget.onShareRoutine(routine),
                       isSelected: widget.selectedIds.contains(routine.id),
                       onTap: widget.isSelectionMode ? () => widget.onToggleSelection(routine.id) : null,

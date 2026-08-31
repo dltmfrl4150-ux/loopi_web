@@ -138,6 +138,15 @@ class _VideoPracticeScreenState extends State<VideoPracticeScreen> {
   Timer? _recordingTimer;
   final AudioRecorder _recorder = AudioRecorder();
 
+  // A -> B segment engine state used while recording/virtual-recording so the
+  // original video plays through every routine segment sequentially, honoring
+  // each segment's speed and repeat count instead of just the first segment.
+  int _engineSegmentIndex = 0;
+  int _enginePlaysRemaining = 1;
+  bool _engineSeeking = false;
+  Timer? _enginePollTimer;
+  VoidCallback? _engineOnFinished;
+
   static const _aspectRatios = <String, double>{
     '9:16 Shorts / Reels': 9 / 16,
     '16:9 YouTube': 16 / 9,
@@ -172,17 +181,37 @@ class _VideoPracticeScreenState extends State<VideoPracticeScreen> {
       final path = widget.routine.localFilePath;
       if (path != null && !kIsWeb && widget.routine.sourceType == SourceType.localVideo) {
         _original = VideoPlayerController.file(File(path));
-        await _original!.initialize();
+        await Future.any([
+          _original!.initialize(),
+          Future.delayed(const Duration(seconds: 30), () => throw Exception('Video initialization timeout')),
+        ]);
       } else if (widget.routine.localDataBytes != null && widget.routine.sourceType == SourceType.localVideo) {
         _originalObjectUrl = createMediaBlobUrl(widget.routine.localDataBytes!, 'video/mp4');
         final uri = _originalObjectUrl == null
             ? Uri.dataFromBytes(widget.routine.localDataBytes!, mimeType: 'video/mp4')
             : Uri.parse(_originalObjectUrl!);
         _original = VideoPlayerController.networkUrl(uri);
-        await _original!.initialize();
+        await Future.any([
+          _original!.initialize(),
+          Future.delayed(const Duration(seconds: 30), () => throw Exception('Video initialization timeout')),
+        ]);
       } else if (path != null && widget.routine.sourceType == SourceType.localVideo) {
         _original = VideoPlayerController.networkUrl(Uri.parse(path));
-        await _original!.initialize();
+        await Future.any([
+          _original!.initialize(),
+          Future.delayed(const Duration(seconds: 30), () => throw Exception('Video initialization timeout')),
+        ]);
+      }
+      
+      // Seek to first segment start time after initialization
+      if (widget.routine.segments.isNotEmpty) {
+        final firstSegmentStartTime = widget.routine.segments.first.startSec;
+        if (_original != null && _original!.value.isInitialized) {
+          await _original!.seekTo(Duration(milliseconds: (firstSegmentStartTime * 1000).round()));
+        }
+        if (_youtubeOriginal != null) {
+          await _youtubeOriginal!.seekTo(seconds: firstSegmentStartTime);
+        }
       }
     } catch (error) {
       _originalError = '원본 영상을 준비하지 못했습니다: $error';
@@ -218,6 +247,11 @@ class _VideoPracticeScreenState extends State<VideoPracticeScreen> {
     try {
       if (_recording) {
         final file = await camera!.stopVideoRecording();
+        _stopSegmentEngine();
+        try {
+          await _original?.pause();
+          await _youtubeOriginal?.pauseVideo();
+        } catch (_) {}
         _recorded = kIsWeb
             ? VideoPlayerController.networkUrl(Uri.parse(file.path))
             : VideoPlayerController.file(File(file.path));
@@ -225,21 +259,12 @@ class _VideoPracticeScreenState extends State<VideoPracticeScreen> {
         _recording = false;
         await _finishRecording(file.path);
       } else {
-        final original = _original;
-        if (original != null) {
-          await original.seekTo(Duration(milliseconds: (widget.routine.segments.first.startSec * 1000).round()));
-          await original.play();
-        }
-        if (_youtubeOriginal != null) {
-          await _youtubeOriginal!.seekTo(seconds: widget.routine.segments.first.startSec);
-          await _youtubeOriginal!.playVideo();
-        }
         await camera!.startVideoRecording();
         _recording = true;
         _recordingTimer?.cancel();
-        _recordingTimer = Timer(_routineDuration, () {
+        unawaited(_beginSegmentEngine(onFinished: () {
           if (_recording) _toggleRecording();
-        });
+        }));
       }
       if (mounted) setState(() {});
     } catch (error) {
@@ -247,35 +272,104 @@ class _VideoPracticeScreenState extends State<VideoPracticeScreen> {
     }
   }
 
-  void _startVirtualRecording() {
+  /// Drives the original video/audio through every routine segment in order
+  /// (A -> B -> ...), applying each segment's speed and repeat count.
+  Future<void> _beginSegmentEngine({required VoidCallback onFinished}) async {
+    _engineOnFinished = onFinished;
+    _enginePollTimer?.cancel();
+    await _playEngineSegment(0);
+  }
+
+  Future<void> _playEngineSegment(int index) async {
+    if (index < 0 || index >= widget.routine.segments.length) return;
+    _engineSegmentIndex = index;
+    final segment = widget.routine.segments[index];
+    _enginePlaysRemaining = segment.loopCount;
+    _engineSeeking = true;
+    try {
+      final original = _original;
+      if (original != null) {
+        await original.setPlaybackSpeed(segment.speed);
+        await original.seekTo(Duration(milliseconds: (segment.startSec * 1000).round()));
+      }
+      if (_youtubeOriginal != null) {
+        await _youtubeOriginal!.setPlaybackRate(segment.speed);
+        await _youtubeOriginal!.seekTo(seconds: segment.startSec, allowSeekAhead: true);
+      }
+    } catch (_) {}
+    _engineSeeking = false;
+    try {
+      await _original?.play();
+      await _youtubeOriginal?.playVideo();
+    } catch (_) {}
+
+    _enginePollTimer?.cancel();
+    _enginePollTimer = Timer.periodic(const Duration(milliseconds: 120), (_) async {
+      if (_engineSeeking) return;
+      try {
+        final time = await _engineCurrentTime();
+        _onEngineTime(time);
+      } catch (_) {}
+    });
+  }
+
+  Future<double> _engineCurrentTime() async {
     final original = _original;
-    if (original != null) {
-      original.seekTo(Duration(milliseconds: (widget.routine.segments.first.startSec * 1000).round()));
-      original.play();
+    if (original != null && original.value.isInitialized) {
+      return original.value.position.inMilliseconds / 1000.0;
     }
     if (_youtubeOriginal != null) {
-      _youtubeOriginal!.seekTo(seconds: widget.routine.segments.first.startSec);
-      _youtubeOriginal!.playVideo();
+      return await _youtubeOriginal!.currentTime;
     }
+    return 0;
+  }
+
+  void _onEngineTime(double time) {
+    final segment = widget.routine.segments[_engineSegmentIndex];
+    if (time + 0.12 < segment.endSec) return;
+
+    if (segment.loopCount == kInfiniteLoop) {
+      unawaited(_playEngineSegment(_engineSegmentIndex));
+      return;
+    }
+    _enginePlaysRemaining -= 1;
+    if (_enginePlaysRemaining > 0) {
+      unawaited(_playEngineSegment(_engineSegmentIndex));
+      return;
+    }
+    if (_engineSegmentIndex + 1 < widget.routine.segments.length) {
+      unawaited(_playEngineSegment(_engineSegmentIndex + 1));
+      return;
+    }
+    _enginePollTimer?.cancel();
+    _engineOnFinished?.call();
+  }
+
+  void _stopSegmentEngine() {
+    _enginePollTimer?.cancel();
+    _enginePollTimer = null;
+    _engineOnFinished = null;
+  }
+
+  void _startVirtualRecording() {
     _virtualTimer?.cancel();
     setState(() {
       _virtualRecording = true;
       _virtualSeconds = 0;
     });
     _virtualTimer = Timer.periodic(const Duration(seconds: 1), (_) {
-      final duration = widget.routine.segments.fold<double>(0, (sum, segment) => sum + segment.endSec - segment.startSec);
-      if (_virtualSeconds >= duration.ceil()) {
-        _stopVirtualRecording();
-      } else if (mounted) {
-        setState(() {
-          _virtualSeconds += 1;
-        });
+      if (mounted && _virtualRecording) {
+        setState(() => _virtualSeconds += 1);
       }
     });
+    unawaited(_beginSegmentEngine(onFinished: () {
+      if (_virtualRecording) _stopVirtualRecording();
+    }));
   }
 
   void _stopVirtualRecording() {
     _virtualTimer?.cancel();
+    _stopSegmentEngine();
     _original?.pause();
     _youtubeOriginal?.pauseVideo();
     if (mounted) {
@@ -287,13 +381,9 @@ class _VideoPracticeScreenState extends State<VideoPracticeScreen> {
     }
   }
 
-  Duration get _routineDuration {
-    final seconds = widget.routine.segments.fold<double>(0, (sum, segment) => sum + segment.endSec - segment.startSec);
-    return Duration(milliseconds: (seconds * 1000).round().clamp(1000, 86400000));
-  }
-
   Future<void> _finishRecording(String path) async {
     _recordingTimer?.cancel();
+    _stopSegmentEngine();
     _recording = false;
     if (mounted) setState(() {});
     await _showSaveDialog(recordedPath: path);
@@ -314,12 +404,16 @@ class _VideoPracticeScreenState extends State<VideoPracticeScreen> {
     );
     controller.dispose();
     if (name == null || name.isEmpty) return;
+    final loopStart = widget.routine.segments.isNotEmpty ? widget.routine.segments.first.startSec : 0.0;
+    final loopEnd = widget.routine.segments.isNotEmpty ? widget.routine.segments.last.endSec : loopStart;
     await widget.library.savePracticeResult(PracticeResult(
       id: 'practice_${DateTime.now().microsecondsSinceEpoch}',
       name: name,
       routineId: widget.routine.id,
       createdAt: DateTime.now(),
       recordedPath: recordedPath,
+      startTime: loopStart,
+      endTime: loopEnd,
     ));
     if (mounted) setState(() => _comparing = true);
   }
@@ -347,6 +441,7 @@ class _VideoPracticeScreenState extends State<VideoPracticeScreen> {
     _syncTimer?.cancel();
     _recordingTimer?.cancel();
     _virtualTimer?.cancel();
+    _stopSegmentEngine();
     _recorder.dispose();
     _syncTimer = Timer.periodic(const Duration(milliseconds: 100), (_) {
       if (!mounted || original == null || !original.value.isInitialized || !recorded.value.isInitialized) return;
@@ -361,6 +456,9 @@ class _VideoPracticeScreenState extends State<VideoPracticeScreen> {
     _original?.dispose();
     _recorded?.dispose();
     _syncTimer?.cancel();
+    _enginePollTimer?.cancel();
+    _recordingTimer?.cancel();
+    _virtualTimer?.cancel();
     _youtubeOriginal?.close();
     revokeMediaBlobUrl(_originalObjectUrl);
     super.dispose();
@@ -551,6 +649,8 @@ class MotionComparisonViewer extends StatefulWidget {
     this.segments = const [],
     this.originalYoutube,
     this.originalWidget,
+    this.loopStart = 0,
+    this.loopEnd = 0,
   });
 
   final VideoPlayerController? original;
@@ -558,6 +658,8 @@ class MotionComparisonViewer extends StatefulWidget {
   final List<RoutineSegment> segments;
   final YoutubePlayerController? originalYoutube;
   final Widget? originalWidget;
+  final double loopStart;
+  final double loopEnd;
 
   @override
   State<MotionComparisonViewer> createState() => _MotionComparisonViewerState();
@@ -567,22 +669,32 @@ class _MotionComparisonViewerState extends State<MotionComparisonViewer> {
   double _position = 0;
   bool _playing = false;
   int _segmentIndex = 0;
+  Timer? _loopTimer;
+  final TransformationController _originalTransformController = TransformationController();
+  final TransformationController _recordedTransformController = TransformationController();
 
   @override
   void initState() {
     super.initState();
     widget.original?.addListener(_onVideoChanged);
     widget.recorded?.addListener(_onVideoChanged);
+    final initialStart = _rangeStart;
+    _position = initialStart;
+    _seekBoth(initialStart);
   }
 
-  void _onVideoChanged() {
-    final player = widget.original ?? widget.recorded;
-    if (!mounted || player == null || !player.value.isInitialized) return;
-    final position = player.value.position.inMilliseconds / 1000.0;
-    setState(() {
-      _position = position.clamp(0.0, _maxPosition);
-      _playing = player.value.isPlaying;
-    });
+  bool get _hasLoopRange => _rangeEnd > _rangeStart;
+
+  double get _rangeStart {
+    if (widget.loopStart > 0) return widget.loopStart;
+    if (widget.segments.isNotEmpty) return widget.segments.first.startSec;
+    return 0;
+  }
+
+  double get _rangeEnd {
+    if (widget.loopEnd > 0) return widget.loopEnd;
+    if (widget.segments.isNotEmpty) return widget.segments.last.endSec;
+    return _maxPosition;
   }
 
   double get _maxPosition {
@@ -597,22 +709,78 @@ class _MotionComparisonViewerState extends State<MotionComparisonViewer> {
     return 1;
   }
 
+  double get _displayMaxPosition => _hasLoopRange ? _rangeEnd : _maxPosition;
+
+  Future<double> _currentPlaybackSeconds() async {
+    if (widget.original != null && widget.original!.value.isInitialized) {
+      return widget.original!.value.position.inMilliseconds / 1000.0;
+    }
+    if (widget.originalYoutube != null) {
+      return await widget.originalYoutube!.currentTime;
+    }
+    if (widget.recorded != null && widget.recorded!.value.isInitialized) {
+      return widget.recorded!.value.position.inMilliseconds / 1000.0;
+    }
+    return 0;
+  }
+
+  void _onVideoChanged() {
+    final player = widget.original;
+    if (!mounted || player == null || !player.value.isInitialized) return;
+    final position = player.value.position.inMilliseconds / 1000.0;
+    final boundedPosition = _hasLoopRange ? position.clamp(_rangeStart, _rangeEnd) : position.clamp(0.0, _maxPosition);
+    setState(() {
+      _position = boundedPosition;
+      _playing = player.value.isPlaying;
+    });
+
+    if (_hasLoopRange && position >= _rangeEnd - 0.1 && player.value.isPlaying) {
+      _loopBackToStart();
+    }
+  }
+
   Future<void> _seekBoth(double seconds) async {
-    final clamped = seconds.clamp(0.0, _maxPosition).toDouble();
+    final lower = _rangeStart;
+    final upper = _displayMaxPosition;
+    final clamped = seconds.clamp(lower, upper).toDouble();
     setState(() => _position = clamped);
     await widget.original?.seekTo(Duration(milliseconds: (clamped * 1000).round()));
     await widget.recorded?.seekTo(Duration(milliseconds: (clamped * 1000).round()));
     if (widget.originalYoutube != null) {
-      await widget.originalYoutube!.seekTo(seconds: clamped);
+      await widget.originalYoutube!.seekTo(seconds: clamped, allowSeekAhead: true);
+    }
+  }
+
+  Future<void> _loopBackToStart() async {
+    if (!_hasLoopRange) return;
+    await _seekBoth(_rangeStart);
+    if (widget.original != null && _playing) {
+      await widget.original!.play();
+    }
+    if (widget.originalYoutube != null && _playing) {
+      await widget.originalYoutube!.playVideo();
     }
   }
 
   Future<void> _togglePlayback() async {
     if (_playing) {
+      _loopTimer?.cancel();
+      _loopTimer = null;
       await widget.original?.pause();
       await widget.recorded?.pause();
       await widget.originalYoutube?.pauseVideo();
     } else {
+      if (_hasLoopRange && _position < _rangeStart) {
+        await _seekBoth(_rangeStart);
+      }
+      _loopTimer?.cancel();
+      _loopTimer = Timer.periodic(const Duration(milliseconds: 120), (_) async {
+        if (!mounted) return;
+        final current = await _currentPlaybackSeconds();
+        if (_hasLoopRange && current >= _rangeEnd - 0.1) {
+          unawaited(_loopBackToStart());
+        }
+      });
       await widget.original?.play();
       await widget.recorded?.play();
       await widget.originalYoutube?.playVideo();
@@ -627,60 +795,147 @@ class _MotionComparisonViewerState extends State<MotionComparisonViewer> {
     await _seekBoth(widget.segments[next].startSec);
   }
 
+  void _resetOriginalZoom() {
+    _originalTransformController.value = Matrix4.identity();
+  }
+
+  void _resetRecordedZoom() {
+    _recordedTransformController.value = Matrix4.identity();
+  }
+
   @override
   void dispose() {
+    _loopTimer?.cancel();
     widget.original?.removeListener(_onVideoChanged);
     widget.recorded?.removeListener(_onVideoChanged);
+    _originalTransformController.dispose();
+    _recordedTransformController.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        const Text('동작 비교', style: TextStyle(fontWeight: FontWeight.w700)),
-        const SizedBox(height: 8),
-        if (widget.originalWidget != null)
-          AspectRatio(aspectRatio: 16 / 9, child: widget.originalWidget!)
-        else
-          _videoPane('원본 영상', widget.original),
-        const SizedBox(height: 12),
-        _videoPane('내 동작', widget.recorded),
-        const SizedBox(height: 12),
-        Row(
-          mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-          children: [
-            IconButton(onPressed: () => _moveSegment(-1), icon: const Icon(Icons.skip_previous), tooltip: '이전 구간'),
-            IconButton(onPressed: () => _seekBoth(_position - 5), icon: const Icon(Icons.replay_5), tooltip: '5초 뒤로'),
-            IconButton(
-              onPressed: _togglePlayback,
-              icon: Icon(_playing ? Icons.pause : Icons.play_arrow),
-              tooltip: _playing ? '일시정지' : '재생',
-            ),
-            IconButton(onPressed: () => _seekBoth(_position + 5), icon: const Icon(Icons.forward_5), tooltip: '5초 앞으로'),
-            IconButton(onPressed: () => _moveSegment(1), icon: const Icon(Icons.skip_next), tooltip: '다음 구간'),
-          ],
-        ),
-        Slider(
-          value: _position.clamp(0.0, _maxPosition),
-          min: 0,
-          max: _maxPosition,
-          onChanged: _seekBoth,
-        ),
-      ],
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final isLandscape = constraints.maxWidth > constraints.maxHeight;
+
+        return SizedBox.expand(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('동작 비교', style: TextStyle(fontWeight: FontWeight.w700)),
+              const SizedBox(height: 8),
+              if (isLandscape)
+                Expanded(
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Expanded(child: _videoPane('원본 영상', widget.original, widget.originalWidget, _originalTransformController, _resetOriginalZoom)),
+                      const SizedBox(width: 12),
+                      Expanded(child: _videoPane('내 동작', widget.recorded, null, _recordedTransformController, _resetRecordedZoom)),
+                    ],
+                  ),
+                )
+              else
+                Expanded(
+                  child: Column(
+                    children: [
+                      Expanded(child: _videoPane('원본 영상', widget.original, widget.originalWidget, _originalTransformController, _resetOriginalZoom)),
+                      const SizedBox(height: 12),
+                      Expanded(child: _videoPane('내 동작', widget.recorded, null, _recordedTransformController, _resetRecordedZoom)),
+                    ],
+                  ),
+                ),
+              const SizedBox(height: 12),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                children: [
+                  IconButton(onPressed: () => _moveSegment(-1), icon: const Icon(Icons.skip_previous), tooltip: '이전 구간'),
+                  IconButton(onPressed: () => _seekBoth(_position - 5), icon: const Icon(Icons.replay_5), tooltip: '5초 뒤로'),
+                  IconButton(
+                    onPressed: _togglePlayback,
+                    icon: Icon(_playing ? Icons.pause : Icons.play_arrow),
+                    tooltip: _playing ? '일시정지' : '재생',
+                  ),
+                  IconButton(onPressed: () => _seekBoth(_position + 5), icon: const Icon(Icons.forward_5), tooltip: '5초 앞으로'),
+                  IconButton(onPressed: () => _moveSegment(1), icon: const Icon(Icons.skip_next), tooltip: '다음 구간'),
+                ],
+              ),
+              Row(
+                children: [
+                  Text(formatMmSs(_position.clamp(_rangeStart, _displayMaxPosition)), style: const TextStyle(fontSize: 12)),
+                  Expanded(
+                    child: Slider(
+                      value: _position.clamp(_rangeStart, _displayMaxPosition),
+                      min: _rangeStart,
+                      max: _displayMaxPosition,
+                      onChanged: _seekBoth,
+                    ),
+                  ),
+                  Text(formatMmSs(_displayMaxPosition), style: const TextStyle(fontSize: 12)),
+                ],
+              ),
+            ],
+          ),
+        );
+      },
     );
   }
 
-  Widget _videoPane(String label, VideoPlayerController? player) {
+  Widget _videoPane(String label, VideoPlayerController? player, Widget? customWidget, TransformationController transformController, VoidCallback onResetZoom) {
+    final isFallback = player == null || !player.value.isInitialized;
+    final fallbackText = label == '내 동작'
+        ? '[가상 녹화 테스트 데이터]\n녹화 영상 프리뷰'
+        : '원본 영상을 불러오는 중입니다...';
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(label, style: const TextStyle(fontWeight: FontWeight.w600)),
+        Row(
+          children: [
+            Text(label, style: const TextStyle(fontWeight: FontWeight.w600)),
+            const Spacer(),
+            IconButton(
+              onPressed: onResetZoom,
+              icon: const Icon(Icons.fullscreen_exit, size: 16),
+              tooltip: '원복',
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(),
+            ),
+          ],
+        ),
         const SizedBox(height: 6),
-        AspectRatio(
-          aspectRatio: player?.value.isInitialized == true ? player!.value.aspectRatio : 16 / 9,
-          child: player?.value.isInitialized == true ? VideoPlayer(player!) : const ColoredBox(color: Colors.black),
+        Expanded(
+          child: InteractiveViewer(
+            transformationController: transformController,
+            minScale: 1.0,
+            maxScale: 4.0,
+            child: FittedBox(
+              fit: BoxFit.contain,
+              child: Container(
+                width: 480,
+                height: 270,
+                color: Colors.black,
+                child: isFallback
+                    ? Center(
+                        child: Padding(
+                          padding: const EdgeInsets.all(18),
+                          child: Text(
+                            fallbackText,
+                            textAlign: TextAlign.center,
+                            style: const TextStyle(color: Colors.white70, fontSize: 16, fontWeight: FontWeight.w600),
+                          ),
+                        ),
+                      )
+                    : customWidget != null
+                        ? AspectRatio(aspectRatio: 16 / 9, child: customWidget)
+                        : AspectRatio(
+                            aspectRatio: player.value.aspectRatio,
+                            child: VideoPlayer(player),
+                          ),
+              ),
+            ),
+          ),
         ),
       ],
     );
@@ -703,6 +958,13 @@ class _PracticeResultViewerState extends State<PracticeResultViewer> {
   YoutubePlayerController? _youtube;
   String? _recordedObjectUrl;
   bool _loading = true;
+  String? _loadError;
+
+  bool get _hasRecordedFallback =>
+      widget.result.recordedPath == null ||
+      widget.result.recordedPath!.trim().isEmpty ||
+      widget.result.recordedPath!.toLowerCase().contains('virtual') ||
+      widget.result.recordedPath!.toLowerCase().contains('dummy');
 
   @override
   void initState() {
@@ -711,6 +973,11 @@ class _PracticeResultViewerState extends State<PracticeResultViewer> {
   }
 
   Future<void> _load() async {
+    setState(() {
+      _loading = true;
+      _loadError = null;
+    });
+
     try {
       if (widget.routine.sourceType == SourceType.youtube) {
         _youtube = YoutubePlayerController.fromVideoId(videoId: widget.routine.videoId, autoPlay: false);
@@ -719,23 +986,74 @@ class _PracticeResultViewerState extends State<PracticeResultViewer> {
         _original = VideoPlayerController.networkUrl(url == null
             ? Uri.dataFromBytes(widget.routine.localDataBytes!, mimeType: 'video/mp4')
             : Uri.parse(url));
-        await _original!.initialize();
+        await Future.any([
+          _original!.initialize(),
+          Future.delayed(const Duration(seconds: 30), () => throw Exception('Video initialization timeout')),
+        ]);
       } else if (widget.routine.localFilePath != null) {
         _original = kIsWeb
             ? VideoPlayerController.networkUrl(Uri.parse(widget.routine.localFilePath!))
             : VideoPlayerController.file(File(widget.routine.localFilePath!));
-        await _original!.initialize();
+        await Future.any([
+          _original!.initialize(),
+          Future.delayed(const Duration(seconds: 30), () => throw Exception('Video initialization timeout')),
+        ]);
       }
+
       final path = widget.result.recordedPath;
-      if (path != null) {
-        _recorded = kIsWeb
-            ? VideoPlayerController.networkUrl(Uri.parse(path))
-            : VideoPlayerController.file(File(path));
-        await _recorded!.initialize();
+      if (!_hasRecordedFallback && path != null && path.trim().isNotEmpty) {
+        try {
+          _recorded = kIsWeb
+              ? VideoPlayerController.networkUrl(Uri.parse(path))
+              : VideoPlayerController.file(File(path));
+          await Future.any([
+            _recorded!.initialize(),
+            Future.delayed(const Duration(seconds: 30), () => throw Exception('Video initialization timeout')),
+          ]);
+        } catch (_) {
+          _recorded = null;
+        }
       }
+
+      final loopStart = widget.result.startTime > 0
+          ? widget.result.startTime
+          : (widget.routine.segments.isNotEmpty ? widget.routine.segments.first.startSec : 0.0);
+      final loopEnd = widget.result.endTime > 0
+          ? widget.result.endTime
+          : (widget.routine.segments.isNotEmpty ? widget.routine.segments.last.endSec : loopStart);
+      if (_original != null && _original!.value.isInitialized) {
+        await _original!.seekTo(Duration(milliseconds: (loopStart * 1000).round()));
+      }
+      if (_youtube != null) {
+        await _youtube!.seekTo(seconds: loopStart);
+      }
+      if (_recorded != null && _recorded!.value.isInitialized) {
+        await _recorded!.seekTo(Duration.zero);
+      }
+    } catch (error) {
+      if (mounted) {
+        setState(() {
+          _loading = false;
+          _loadError = '영상 로드를 실패했습니다.\n${error.toString()}';
+        });
+      }
+      return;
     } finally {
-      if (mounted) setState(() => _loading = false);
+      if (mounted && _loading) {
+        setState(() => _loading = false);
+      }
     }
+  }
+
+  Future<void> _retryLoad() async {
+    _original?.dispose();
+    _recorded?.dispose();
+    _youtube?.close();
+    _original = null;
+    _recorded = null;
+    _youtube = null;
+    _recordedObjectUrl = null;
+    await _load();
   }
 
   @override
@@ -749,9 +1067,53 @@ class _PracticeResultViewerState extends State<PracticeResultViewer> {
 
   @override
   Widget build(BuildContext context) {
-    if (_loading) return const Scaffold(body: Center(child: CircularProgressIndicator()));
+    if (_loading) {
+      return const Scaffold(body: Center(child: CircularProgressIndicator()));
+    }
+
+    if (_loadError != null) {
+      return Scaffold(
+        appBar: AppBar(
+          title: Text(widget.result.name),
+          leading: IconButton(
+            icon: const Icon(Icons.arrow_back),
+            onPressed: () => Navigator.of(context).pop(),
+          ),
+        ),
+        body: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(Icons.error_outline_rounded, size: 52, color: Colors.orange),
+                const SizedBox(height: 16),
+                Text(
+                  _loadError!,
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(fontSize: 15),
+                ),
+                const SizedBox(height: 16),
+                FilledButton.icon(
+                  onPressed: _retryLoad,
+                  icon: const Icon(Icons.refresh),
+                  label: const Text('다시 시도'),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+
     return Scaffold(
-      appBar: AppBar(title: Text(widget.result.name)),
+      appBar: AppBar(
+        title: Text(widget.result.name),
+        leading: IconButton(
+          icon: const Icon(Icons.arrow_back),
+          onPressed: () => Navigator.of(context).pop(),
+        ),
+      ),
       body: Padding(
         padding: const EdgeInsets.all(16),
         child: MotionComparisonViewer(
@@ -760,6 +1122,8 @@ class _PracticeResultViewerState extends State<PracticeResultViewer> {
           segments: widget.routine.segments,
           originalYoutube: _youtube,
           originalWidget: _youtube == null ? null : YoutubePlayer(controller: _youtube!),
+          loopStart: widget.result.startTime > 0 ? widget.result.startTime : (widget.routine.segments.isNotEmpty ? widget.routine.segments.first.startSec : 0),
+          loopEnd: widget.result.endTime > 0 ? widget.result.endTime : (widget.routine.segments.isNotEmpty ? widget.routine.segments.last.endSec : 0),
         ),
       ),
     );
@@ -823,25 +1187,33 @@ class _AudioPracticeScreenState extends State<AudioPracticeScreen> {
       for (var index = 0; index < widget.routine.segments.length; index++) {
         if (!mounted) return;
         final segment = widget.routine.segments[index];
-        setState(() {
-          _segmentIndex = index;
-          _step = '구간 ${index + 1} 원본 재생';
-        });
-        await _loadAudioSource();
-        await _player.seek(Duration(milliseconds: (segment.startSec * 1000).round()));
-        await _player.resume();
-        await Future<void>.delayed(Duration(milliseconds: ((segment.endSec - segment.startSec) * 1000).round()));
-        await _player.pause();
-        if (!mounted) return;
-        setState(() => _step = '구간 ${index + 1} 내 음성 녹음');
-        setState(() => _step = '구간 ${index + 1} 녹음 준비');
-        await Future<void>.delayed(const Duration(seconds: 3));
-        final directory = await getTemporaryDirectory();
-        final path = '${directory.path}/loopi_${DateTime.now().microsecondsSinceEpoch}.m4a';
-        if (await _recorder.hasPermission()) {
-          await _recorder.start(const RecordConfig(), path: path);
-          await Future<void>.delayed(Duration(milliseconds: ((segment.endSec - segment.startSec) * 1000).round()));
-          await _recorder.stop();
+        final repeatCount = segment.loopCount == kInfiniteLoop ? 1 : segment.loopCount.clamp(1, 999);
+        for (var repeat = 0; repeat < repeatCount; repeat++) {
+          if (!mounted) return;
+          setState(() {
+            _segmentIndex = index;
+            _step = repeatCount > 1
+                ? '구간 ${index + 1} 원본 재생 (${repeat + 1}/$repeatCount)'
+                : '구간 ${index + 1} 원본 재생';
+          });
+          await _loadAudioSource();
+          await _player.setPlaybackRate(segment.speed);
+          await _player.seek(Duration(milliseconds: (segment.startSec * 1000).round()));
+          await _player.resume();
+          final segmentMs = ((segment.endSec - segment.startSec) * 1000 / segment.speed).round();
+          await Future<void>.delayed(Duration(milliseconds: segmentMs));
+          await _player.pause();
+          if (!mounted) return;
+          setState(() => _step = '구간 ${index + 1} 내 음성 녹음');
+          setState(() => _step = '구간 ${index + 1} 녹음 준비');
+          await Future<void>.delayed(const Duration(seconds: 3));
+          final directory = await getTemporaryDirectory();
+          final path = '${directory.path}/loopi_${DateTime.now().microsecondsSinceEpoch}.m4a';
+          if (await _recorder.hasPermission()) {
+            await _recorder.start(const RecordConfig(), path: path);
+            await Future<void>.delayed(Duration(milliseconds: segmentMs));
+            await _recorder.stop();
+          }
         }
       }
       if (mounted) setState(() => _step = '연습 완료');

@@ -5,6 +5,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:loopi_web/main.dart';
 import 'package:loopi_web/models/routine_models.dart';
+import 'package:loopi_web/screens/home_dashboard_screen.dart';
 import 'package:loopi_web/state/routine_library.dart';
 import 'package:loopi_web/widgets/app_logo.dart';
 import 'package:loopi_web/widgets/save_routine_dialog.dart';
@@ -59,6 +60,48 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(await future, 'Hip Hop Routine');
+  });
+
+  test('Practice result keeps the original loop range metadata on save and reload', () async {
+    final result = PracticeResult(
+      id: 'practice_1',
+      name: 'Practice 1',
+      routineId: 'routine_1',
+      createdAt: DateTime(2024, 8, 31, 10, 0),
+      startTime: 12.5,
+      endTime: 18.75,
+    );
+
+    final json = result.toJson();
+    final reloaded = PracticeResult.fromJson(json);
+
+    expect(reloaded.startTime, 12.5);
+    expect(reloaded.endTime, 18.75);
+  });
+
+  testWidgets('Home dashboard View All switches to the library tab', (WidgetTester tester) async {
+    final library = RoutineLibrary();
+    await library.load();
+
+    await tester.pumpWidget(
+      EasyLocalization(
+        supportedLocales: const [Locale('en'), Locale('ko')],
+        path: 'assets/translations',
+        fallbackLocale: const Locale('en'),
+        startLocale: const Locale('ko'),
+        child: HomeDashboardScreen(library: library),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final nav = tester.widget<NavigationBar>(find.byType(NavigationBar));
+    expect(nav.selectedIndex, 0);
+
+    await tester.tap(find.widgetWithText(TextButton, '전체 보기'));
+    await tester.pumpAndSettle();
+
+    final updatedNav = tester.widget<NavigationBar>(find.byType(NavigationBar));
+    expect(updatedNav.selectedIndex, 4);
   });
 
   test('Routine library creates and persists groups with ordered routine ids', () async {
