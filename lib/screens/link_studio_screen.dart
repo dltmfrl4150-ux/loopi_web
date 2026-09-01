@@ -10,6 +10,8 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:video_player/video_player.dart';
 import 'package:audioplayers/audioplayers.dart';
+// ignore: avoid_web_libraries_in_flutter
+import 'dart:html' as html;
 
 import '../models/routine_models.dart';
 import '../state/link_studio_session.dart';
@@ -78,11 +80,14 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
   AudioPlayer? _audioPlayer;
   StreamSubscription<YoutubePlayerValue>? _valueSub;
   StreamSubscription<YoutubeVideoState>? _stateSub;
-  Timer? _pollTimer;
+
+  Timer? _loopPlaybackTimer;
   Timer? _delayTimer;
-  DateTime? _ignoreLoopUntil;
+  Timer? _routineTimer;
+  Timer? _playbackMonitorTimer;
+  int _routineSessionId = 0;
   DateTime? _lastSeekAt;
-  // Guards the position listener while a forced seek/segment-switch is in flight.
+
   bool _isLoopTransitioning = false;
   String _videoUrl = kDefaultVideoUrl;
   String _videoId = 'M7lc1UVf-VE';
@@ -94,8 +99,7 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
   String? _lastDetectedClipboardText;
   String? _mediaObjectUrl;
   bool _audioLoading = false;
-  double? _activePlaybackStart;
-  double? _activePlaybackEnd;
+  String? _videoLoadError;
   bool _showClipboardBanner = true;
 
   bool get _inWidgetTest =>
@@ -163,18 +167,28 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
         'mkv' => 'video/x-matroska',
         _ => 'video/mp4',
       };
-        _mediaObjectUrl = createMediaBlobUrl(widget.file!.bytes!, mimeType);
-        final uri = _mediaObjectUrl == null
+      _mediaObjectUrl = createMediaBlobUrl(widget.file!.bytes!, mimeType);
+      final uri = _mediaObjectUrl == null
           ? Uri.dataFromBytes(widget.file!.bytes!, mimeType: mimeType)
           : Uri.parse(_mediaObjectUrl!);
       _videoPlayer = VideoPlayerController.networkUrl(uri);
     } else {
       return;
     }
-    await _videoPlayer!.initialize();
-    _session.setVideoDuration(_videoPlayer!.value.duration.inMilliseconds / 1000.0);
-    _videoPlayer!.addListener(_onVideoPlayerUpdate);
-    if (mounted) setState(() {});
+    _videoLoadError = null;
+    try {
+      await _videoPlayer!.initialize().timeout(
+            const Duration(seconds: 5),
+            onTimeout: () => throw TimeoutException('Video initialization timed out'),
+          );
+      _session.setVideoDuration(_videoPlayer!.value.duration.inMilliseconds / 1000.0);
+      _videoPlayer!.addListener(_onVideoPlayerUpdate);
+    } catch (error) {
+      debugPrint('Video initialization error: $error');
+      _videoLoadError = '영상을 불러오지 못했습니다. 다시 시도해주세요.';
+    } finally {
+      if (mounted) setState(() {});
+    }
   }
 
   Future<void> _initializeAudioPlayer() async {
@@ -197,9 +211,6 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
       _audioPlayer!.onPositionChanged.listen((position) {
         final seconds = position.inMilliseconds / 1000.0;
         _syncSectionHighlight(seconds);
-        if (_session.isTesting) {
-          _handleTestTime(seconds);
-        }
       });
     } finally {
       _audioLoading = false;
@@ -212,16 +223,11 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
     final duration = _videoPlayer!.value.duration.inMilliseconds / 1000.0;
     final position = _videoPlayer!.value.position.inMilliseconds / 1000.0;
     
-    if (duration > 1) {
+    if (duration > 1 && (_session.videoDuration - duration).abs() > 0.5) {
       _session.setVideoDuration(duration);
     }
     
     _syncSectionHighlight(position);
-    if (_session.isTesting) {
-      _handleTestTime(position);
-    }
-    
-    if (mounted) setState(() {});
   }
 
   void _onSessionChanged() {
@@ -231,16 +237,13 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
 
   void _onPlayerValue(YoutubePlayerValue value) {
     final seconds = value.metaData.duration.inMilliseconds / 1000.0;
-    if (seconds > 1) {
+    if (seconds > 1 && (_session.videoDuration - seconds).abs() > 0.5) {
       _session.setVideoDuration(seconds);
     }
   }
 
   void _onVideoState(YoutubeVideoState state) {
-    final seconds = state.position.inMilliseconds / 1000.0;
-    _syncSectionHighlight(seconds);
-    if (!_session.isTesting) return;
-    _handleTestTime(seconds);
+    _syncSectionHighlight(state.position.inMilliseconds / 1000.0);
   }
 
   void _syncSectionHighlight(double time) {
@@ -317,22 +320,17 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
   }
 
   void _onTimeChanged(String value, int index, bool isStart) {
-    // Only commit if the value looks like a valid time format to avoid invalid intermediate states
     if (value.isEmpty) return;
     
-    // Try to parse as time format (mm:ss or m:ss)
     final parts = value.split(':');
     if (parts.length == 2) {
       try {
         final minutes = int.parse(parts[0]);
         final seconds = int.parse(parts[1]);
         if (minutes >= 0 && seconds >= 0 && seconds < 60) {
-          // Valid time format, commit the change
           _commitTimeField(index: index, isStart: isStart);
         }
-      } catch (_) {
-        // Invalid format, don't commit
-      }
+      } catch (_) {}
     }
   }
 
@@ -353,6 +351,14 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
           break;
         case SourceType.localVideo:
           await _videoPlayer?.seekTo(Duration(milliseconds: (seconds * 1000).toInt()));
+          if (kIsWeb) {
+            final videos = html.document.querySelectorAll('video');
+            for (final element in videos) {
+              if (element is html.VideoElement) {
+                element.currentTime = seconds;
+              }
+            }
+          }
           break;
         case SourceType.audio:
           await _audioPlayer?.seek(Duration(milliseconds: (seconds * 1000).toInt()));
@@ -370,6 +376,14 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
           break;
         case SourceType.localVideo:
           await _videoPlayer?.setPlaybackSpeed(speed);
+          if (kIsWeb) {
+            final videos = html.document.querySelectorAll('video');
+            for (final element in videos) {
+              if (element is html.VideoElement) {
+                element.playbackRate = speed;
+              }
+            }
+          }
           break;
         case SourceType.audio:
           await _audioPlayer?.setPlaybackRate(speed);
@@ -387,6 +401,14 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
           break;
         case SourceType.localVideo:
           await _videoPlayer?.play();
+          if (kIsWeb) {
+            final videos = html.document.querySelectorAll('video');
+            for (final element in videos) {
+              if (element is html.VideoElement) {
+                element.play();
+              }
+            }
+          }
           break;
         case SourceType.audio:
           await _audioPlayer?.resume();
@@ -404,6 +426,7 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
           break;
         case SourceType.localVideo:
           await _videoPlayer?.pause();
+          _forceWebVideoPause();
           break;
         case SourceType.audio:
           await _audioPlayer?.pause();
@@ -426,7 +449,44 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
     }
   }
 
+  void _forceWebVideoSeekAndPlay(double startSec, double speed) {
+    if (kIsWeb) {
+      try {
+        final videos = html.document.querySelectorAll('video');
+        for (final element in videos) {
+          if (element is html.VideoElement) {
+            element.currentTime = startSec;
+            element.playbackRate = speed;
+            element.play();
+          }
+        }
+      } catch (e) {
+        debugPrint('Native DOM control error: $e');
+      }
+    }
+  }
+
+  void _forceWebVideoPause() {
+    if (kIsWeb) {
+      try {
+        final videos = html.document.querySelectorAll('video');
+        for (final element in videos) {
+          if (element is html.VideoElement) {
+            element.pause();
+          }
+        }
+      } catch (e) {
+        debugPrint('Native DOM pause error: $e');
+      }
+    }
+  }
+
   void _commitTimeField({required int index, required bool isStart}) {
+    _routineSessionId++;
+    _routineTimer?.cancel();
+    _loopPlaybackTimer?.cancel();
+    _playbackMonitorTimer?.cancel();
+    
     final controller = isStart ? _startControllers[index] : _endControllers[index];
     final ok = _session.applyManualTime(index: index, isStart: isStart, text: controller.text);
     final segment = _session.segments[index];
@@ -559,9 +619,6 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
           },
         ),
         duration: const Duration(seconds: 10),
-        onVisible: () {
-          // Banner is now visible
-        },
       ),
     ).closed.then((_) {
       if (mounted) {
@@ -579,10 +636,15 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
 
   Future<void> _selectRow(int index) async {
     if (_session.isTesting) return;
+    _routineSessionId++;
+    _routineTimer?.cancel();
+    _loopPlaybackTimer?.cancel();
+    _playbackMonitorTimer?.cancel();
+    
     _session.selectSegment(index);
     final segment = _session.segments[index];
-    await _applySpeed(segment.speed);
-    await _seekTo(segment.startSec, force: true);
+    _applySpeed(segment.speed);
+    _seekTo(segment.startSec, force: true);
   }
 
   void _onRangeChangeStart(RangeValues values) {
@@ -591,6 +653,11 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
 
   void _onRangeChanged(RangeValues values) {
     if (_session.isTesting) return;
+    _routineSessionId++;
+    _routineTimer?.cancel();
+    _loopPlaybackTimer?.cancel();
+    _playbackMonitorTimer?.cancel();
+    
     final previous = _rangeBeforeDrag ?? _session.activeRange;
     final startMoved = (values.start - previous.start).abs();
     final endMoved = (values.end - previous.end).abs();
@@ -603,82 +670,177 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
     }
   }
 
+  bool get _isPlayerReady {
+    if (_inWidgetTest) return true;
+    switch (_session.sourceType) {
+      case SourceType.youtube:
+        return _youtubeInitialized;
+      case SourceType.localVideo:
+        return _videoPlayer != null && _videoPlayer!.value.isInitialized;
+      case SourceType.audio:
+        return _audioPlayer != null && !_audioLoading;
+    }
+  }
+
   Future<void> _toggleTestPlayback() async {
     if (_session.isTesting) {
       await _stopTestPlayback();
       return;
     }
-    final startIndex = _session.selectedIndex.clamp(0, _session.segments.length - 1);
-    _session.selectSegment(startIndex);
-    _session.beginTest(startIndex: startIndex);
-    _highlightedSection = _session.testSegmentIndex;
-    _delayPending = false;
-    final first = _session.testSegment;
-    _activePlaybackStart = first.startSec;
-    _activePlaybackEnd = first.endSec;
-
-    // Force playback to the exact start of the selected segment: pause first so the
-    // position listener can't observe a stale "reached end" position mid-seek, and
-    // block the listener entirely until the seek has actually completed.
-    _isLoopTransitioning = true;
-    await _pause();
-    await _applySpeed(first.speed);
-    await _seekTo(first.startSec, force: true);
-    _isLoopTransitioning = false;
-    if (!_inWidgetTest) {
-      await _play();
+    if (!_isPlayerReady) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('영상을 불러오는 중입니다. 잠시 후 다시 시도해주세요.')),
+      );
+      return;
     }
-    _pollTimer?.cancel();
-    _pollTimer = Timer.periodic(const Duration(milliseconds: 120), (_) async {
-      if (!_session.isTesting) return;
-      try {
-        final time = await _getCurrentTime();
-        _syncSectionHighlight(time);
-        _handleTestTime(time);
-      } catch (_) {}
-    });
+    
+    _routineSessionId++;
+    _routineTimer?.cancel();
+    _loopPlaybackTimer?.cancel();
+    _playbackMonitorTimer?.cancel();
+    _isLoopTransitioning = false;
+    
+    final activeIndex = _session.selectedIndex.clamp(0, _session.segments.length - 1);
+    _session.selectSegment(activeIndex);
+    _session.beginTest(startIndex: activeIndex);
+    _delayPending = false;
+    await _jumpToSegment(activeIndex);
   }
 
-  void _handleTestTime(double time) {
-    if (!_session.isTesting || _delayPending) return;
-    if (_isLoopTransitioning) return;
-    final now = DateTime.now();
-    if (_ignoreLoopUntil != null && now.isBefore(_ignoreLoopUntil!)) return;
-    final segment = _session.testSegment;
-    final start = _activePlaybackStart ?? segment.startSec;
-    if (time + 0.04 < start) return;
-    final end = _activePlaybackEnd ?? segment.endSec;
-    final reachedEnd = time >= end - 0.04;
-    if (!reachedEnd) return;
+  Future<void> _jumpToSegment([int? targetIndex]) async {
+    if (!mounted || !_session.isTesting) return;
 
-    _ignoreLoopUntil = DateTime.now().add(const Duration(days: 1));
+    if (targetIndex != null) {
+      _session.selectSegment(targetIndex);
+    }
+
+    _routineSessionId++;
+    final int currentSession = _routineSessionId;
+    _playbackMonitorTimer?.cancel();
+
+    final segment = _session.testSegment;
+    final double startSec = segment.startSec;
+    final double endSec = segment.endSec;
+    final double speed = segment.speed;
+
+    if (endSec <= startSec) return;
+
+    try {
+      // 1. 순서 교체: 재생(Play)보다 이동(Seek)을 무조건 1순위로 먼저 쏴야 명령이 씹히지 않습니다.
+      _seekTo(startSec, force: true);
+      _applySpeed(speed);
+
+      if (kIsWeb && _session.sourceType == SourceType.localVideo) {
+        try {
+          final videos = html.document.querySelectorAll('video');
+          for (final element in videos) {
+            if (element is html.VideoElement) {
+              element.currentTime = startSec;
+              element.playbackRate = speed;
+            }
+          }
+        } catch (_) {}
+      }
+
+      // 2. 이동 명령이 확실히 처리되도록 0.1초 텀을 주고 재생 지시
+      Future.delayed(const Duration(milliseconds: 100), () {
+        if (_routineSessionId == currentSession && mounted && _session.isTesting) {
+          _play();
+          if (kIsWeb && _session.sourceType == SourceType.localVideo) {
+            try {
+              final videos = html.document.querySelectorAll('video');
+              for (final element in videos) {
+                if (element is html.VideoElement) {
+                  element.play();
+                }
+              }
+            } catch (_) {}
+          }
+        }
+      });
+
+      bool hasActuallyStarted = false;
+      int tickCount = 0;
+
+      // 3. 타이머 모니터링
+      _playbackMonitorTimer = Timer.periodic(const Duration(milliseconds: 50), (timer) async {
+        if (_routineSessionId != currentSession || !_session.isTesting || !mounted) {
+          timer.cancel();
+          return;
+        }
+
+        tickCount++;
+
+        try {
+          final currentPos = await _getCurrentTime();
+
+          // ✨ 자가 치유(Self-healing) 로직: 실제 시작 지점으로 갔는지 도장 찍기
+          if (!hasActuallyStarted) {
+            // 루프가 0.5초 미만으로 매우 짧은 경우를 대비한 안전 범위 계산
+            final safeEndCheck = (endSec - startSec < 0.5) ? endSec : endSec - 0.2;
+            
+            // 현재 위치가 정상적으로 startSec 부근으로 리셋되었는지 확인
+            if (currentPos >= startSec - 1.0 && currentPos < safeEndCheck) {
+              hasActuallyStarted = true; // 정상 이동 완료 도장 쾅!
+            } else {
+              // 0.5초(10틱)가 지나도록 시작점으로 안 갔다면 브라우저가 이동 명령을 씹은 것! 강제 재시도
+              if (tickCount > 10 && tickCount % 10 == 0) {
+                _seekTo(startSec, force: true);
+                _play();
+              }
+              return; // 도장을 받기 전까지는 절대 종료 검사를 하지 않음 (끝까지 뚫고 가는 버그 원천 차단)
+            }
+          }
+
+          // 확실하게 구간 안에 진입한 후부터 종료 지점(0.05초 오차) 감시
+          if (currentPos >= endSec - 0.05) {
+            timer.cancel();
+            debugPrint('⏹️ [Loop Completed] Reached $currentPos (End: $endSec)');
+
+            _pause();
+            if (kIsWeb && _session.sourceType == SourceType.localVideo) {
+              try {
+                final videos = html.document.querySelectorAll('video');
+                for (final element in videos) {
+                  if (element is html.VideoElement) {
+                    element.pause();
+                  }
+                }
+              } catch (_) {}
+            }
+
+            _advanceLoopSegment();
+          }
+        } catch (_) {}
+      });
+    } catch (error) {
+      debugPrint('❌ [Start Routine Error]: $error');
+    }
+  }
+  Future<void> _advanceLoopSegment() async {
+    if (!_session.isTesting || !mounted) return;
+    final segment = _session.testSegment;
     final delaySec = segment.delaySec;
     final result = _session.onLoopHit();
-    unawaited(_afterLoopHit(result, delaySec));
-  }
-
-  Future<void> _afterLoopHit(LoopHitResult result, int delaySec) async {
-    if (result == LoopHitResult.finished) {
-      await _stopTestPlayback();
-      return;
+    switch (result) {
+      case LoopHitResult.seekToStart:
+        debugPrint('🔁 [Repeat Loop] Count: ${_session.playsRemaining}');
+        break;
+      case LoopHitResult.nextSegment:
+        debugPrint('⏭️ [Next Loop] Moving to next segment: ${_session.testSegmentIndex}');
+        break;
+      case LoopHitResult.finished:
+        debugPrint('🏁 [Routine Finished]');
+        _forceWebVideoPause();
+        await _stopTestPlayback();
+        return;
     }
     await _waitDelay(delaySec);
     if (!_session.isTesting || !mounted) return;
-    _ignoreLoopUntil = DateTime.now().add(const Duration(milliseconds: 280));
-    _highlightedSection = _session.testSegmentIndex;
-    _activePlaybackStart = _session.testSegment.startSec;
-    _activePlaybackEnd = _session.testSegment.endSec;
-    _isLoopTransitioning = true;
-    await _pause();
-    if (result == LoopHitResult.nextSegment) {
-      await _applySpeed(_session.testSegment.speed);
-    }
-    await _seekTo(_session.testSegment.startSec, force: true);
-    _isLoopTransitioning = false;
-    if (!_inWidgetTest) {
-      await _play();
-    }
-    if (mounted) setState(() {});
+    
+    _routineSessionId++;
+    _playbackMonitorTimer?.cancel();
+    await _jumpToSegment(_session.testSegmentIndex);
   }
 
   Future<void> _waitDelay(int delaySec) async {
@@ -699,18 +861,23 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
   }
 
   Future<void> _stopTestPlayback() async {
+    _routineSessionId++;
     _delayTimer?.cancel();
     _delayTimer = null;
     _delayPending = false;
-    _pollTimer?.cancel();
-    _pollTimer = null;
+    _loopPlaybackTimer?.cancel();
+    _loopPlaybackTimer = null;
+    _routineTimer?.cancel();
+    _routineTimer = null;
+    _playbackMonitorTimer?.cancel();
+    _playbackMonitorTimer = null;
+    _isLoopTransitioning = false;
     _session.stopTest();
-    _activePlaybackStart = null;
-    _activePlaybackEnd = null;
     _highlightedSection = _session.selectedIndex;
     if (!_inWidgetTest) {
       try {
         await _pause();
+        _forceWebVideoPause();
         await _applySpeed(_session.active.speed);
         await _seekTo(_session.active.startSec, force: true);
       } catch (_) {}
@@ -723,8 +890,6 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
     }
     if (!mounted) return;
 
-    // HtmlElementView (YouTube iframe) sits above Flutter overlays on web and
-    // swallows pointer/keyboard events. Unmount it while the dialog is open.
     setState(() => _saveDialogOpen = true);
     if (!_inWidgetTest) {
       try {
@@ -757,8 +922,10 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    _pollTimer?.cancel();
+    _loopPlaybackTimer?.cancel();
     _delayTimer?.cancel();
+    _routineTimer?.cancel();
+    _playbackMonitorTimer?.cancel();
     _valueSub?.cancel();
     _stateSub?.cancel();
     _session.removeListener(_onSessionChanged);
@@ -837,17 +1004,38 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
   Widget _buildVideoScaffold(bool testing) {
     return _buildMainScaffold(
       testing: testing,
-      mediaWidget: _videoPlayer != null && _videoPlayer!.value.isInitialized
-          ? ClipRRect(
-              borderRadius: BorderRadius.circular(16),
-              child: AspectRatio(
-                aspectRatio: _videoPlayer!.value.aspectRatio,
-                child: VideoPlayer(_videoPlayer!),
+      mediaWidget: _videoLoadError != null
+          ? Center(
+              child: Padding(
+                padding: const EdgeInsets.all(24),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      _videoLoadError!,
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(color: Colors.white70),
+                    ),
+                    const SizedBox(height: 12),
+                    FilledButton(
+                      onPressed: _initializeVideoPlayer,
+                      child: const Text('다시 시도'),
+                    ),
+                  ],
+                ),
               ),
             )
-          : const Center(
-              child: CircularProgressIndicator(),
-            ),
+          : _videoPlayer != null && _videoPlayer!.value.isInitialized
+              ? ClipRRect(
+                  borderRadius: BorderRadius.circular(16),
+                  child: AspectRatio(
+                    aspectRatio: _videoPlayer!.value.aspectRatio,
+                    child: VideoPlayer(_videoPlayer!),
+                  ),
+                )
+              : const Center(
+                  child: CircularProgressIndicator(),
+                ),
       showUrlBar: false,
     );
   }
@@ -896,22 +1084,22 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
   }) {
     return Scaffold(
       backgroundColor: LoopiColors.canvas,
-        appBar: widget.embedded || !Navigator.of(context).canPop()
+      appBar: widget.embedded || !Navigator.of(context).canPop()
           ? null
           : AppBar(
-        backgroundColor: Colors.transparent,
-        foregroundColor: LoopiColors.ink,
-        elevation: 0,
-        title: const AppLogo(height: 30),
-        leading: IconButton(
-          icon: const Icon(Icons.close),
-          onPressed: () {
-            if (Navigator.of(context).canPop()) {
-              Navigator.of(context).pop();
-            }
-          },
-        ),
-        ),
+              backgroundColor: Colors.transparent,
+              foregroundColor: LoopiColors.ink,
+              elevation: 0,
+              title: const AppLogo(height: 30),
+              leading: IconButton(
+                icon: const Icon(Icons.close),
+                onPressed: () {
+                  if (Navigator.of(context).canPop()) {
+                    Navigator.of(context).pop();
+                  }
+                },
+              ),
+            ),
       body: Column(
         children: [
           Expanded(
@@ -925,8 +1113,8 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
                   child: AspectRatio(
                     aspectRatio: 16 / 9,
                     child: ColoredBox(
-                      color: Colors.black,
-                      child: mediaWidget,
+                    color: Colors.black,
+                    child: mediaWidget,
                     ),
                   ),
                 ),
@@ -1061,21 +1249,29 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
       if (filePath == null && fileBytes == null) return;
       final fileName = result.files.single.name;
       
-      // Reinitialize the appropriate player
       if (_session.sourceType == SourceType.localVideo) {
         await _videoPlayer?.dispose();
         revokeMediaBlobUrl(_mediaObjectUrl);
         _mediaObjectUrl = _createSelectedVideoBlobUrl(selectedFile);
         _videoPlayer = filePath != null
             ? VideoPlayerController.file(File(filePath))
-          : VideoPlayerController.networkUrl(
-            _mediaObjectUrl == null
-              ? Uri.dataFromBytes(fileBytes!, mimeType: 'video/mp4')
-              : Uri.parse(_mediaObjectUrl!),
-            );
-        await _videoPlayer!.initialize();
-        _session.setVideoDuration(_videoPlayer!.value.duration.inMilliseconds / 1000.0);
-        _videoPlayer!.addListener(_onVideoPlayerUpdate);
+            : VideoPlayerController.networkUrl(
+                _mediaObjectUrl == null
+                    ? Uri.dataFromBytes(fileBytes!, mimeType: 'video/mp4')
+                    : Uri.parse(_mediaObjectUrl!),
+              );
+        _videoLoadError = null;
+        try {
+          await _videoPlayer!.initialize().timeout(
+                const Duration(seconds: 5),
+                onTimeout: () => throw TimeoutException('Video initialization timed out'),
+              );
+          _session.setVideoDuration(_videoPlayer!.value.duration.inMilliseconds / 1000.0);
+          _videoPlayer!.addListener(_onVideoPlayerUpdate);
+        } catch (error) {
+          debugPrint('Video initialization error: $error');
+          _videoLoadError = '영상을 불러오지 못했습니다. 다시 시도해주세요.';
+        }
       } else if (_session.sourceType == SourceType.audio) {
         await _audioPlayer?.dispose();
         _audioPlayer = AudioPlayer();
@@ -1089,11 +1285,7 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
           _session.setVideoDuration(duration.inMilliseconds / 1000.0);
         }
         _audioPlayer!.onPositionChanged.listen((position) {
-          final seconds = position.inMilliseconds / 1000.0;
-          _syncSectionHighlight(seconds);
-          if (_session.isTesting) {
-            _handleTestTime(seconds);
-          }
+          _syncSectionHighlight(position.inMilliseconds / 1000.0);
         });
       }
       

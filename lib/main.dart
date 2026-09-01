@@ -4,6 +4,7 @@ import 'package:easy_localization/easy_localization.dart';
 
 import 'screens/social_login_screen.dart';
 import 'state/routine_library.dart';
+import 'state/user_state.dart';
 import 'theme/loopi_colors.dart';
 
 void main() async {
@@ -29,6 +30,7 @@ class LoopiApp extends StatefulWidget {
 
 class _LoopiAppState extends State<LoopiApp> {
   final RoutineLibrary _library = RoutineLibrary();
+  final UserSubscriptionState _userState = UserSubscriptionState();
 
   @override
   Widget build(BuildContext context) {
@@ -60,7 +62,7 @@ class _LoopiAppState extends State<LoopiApp> {
         useMaterial3: true,
       ),
       themeMode: ThemeMode.system,
-      home: SocialLoginScreen(library: _library),
+      home: SocialLoginScreen(library: _library, userState: _userState),
     );
   }
 }

@@ -201,6 +201,7 @@ class PracticeResult {
     this.recordedDataBytes,
     this.startTime = 0,
     this.endTime = 0,
+    this.playbackRate = 1.0,
   });
 
   final String id;
@@ -211,6 +212,7 @@ class PracticeResult {
   final List<int>? recordedDataBytes;
   final double startTime;
   final double endTime;
+  final double playbackRate;
 
   factory PracticeResult.fromJson(Map<String, dynamic> json) {
     return PracticeResult(
@@ -224,6 +226,7 @@ class PracticeResult {
           : null,
       startTime: (json['startTime'] as num?)?.toDouble() ?? 0,
       endTime: (json['endTime'] as num?)?.toDouble() ?? 0,
+      playbackRate: (json['playbackRate'] as num?)?.toDouble() ?? 1.0,
     );
   }
 
@@ -236,6 +239,7 @@ class PracticeResult {
         'recordedDataBytes': recordedDataBytes == null ? null : base64Encode(recordedDataBytes!),
         'startTime': startTime,
         'endTime': endTime,
+        'playbackRate': playbackRate,
       };
 }
 

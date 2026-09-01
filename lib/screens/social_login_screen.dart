@@ -2,19 +2,21 @@ import 'package:flutter/material.dart';
 import 'package:easy_localization/easy_localization.dart';
 
 import '../state/routine_library.dart';
+import '../state/user_state.dart';
 import '../theme/loopi_colors.dart';
 import '../widgets/app_logo.dart';
 import 'home_dashboard_screen.dart';
 
 class SocialLoginScreen extends StatelessWidget {
-  const SocialLoginScreen({super.key, required this.library});
+  const SocialLoginScreen({super.key, required this.library, this.userState});
 
   final RoutineLibrary library;
+  final UserSubscriptionState? userState;
 
   void _continueAsGuest(BuildContext context) {
     Navigator.of(context).pushReplacement(
       MaterialPageRoute<void>(
-        builder: (_) => HomeDashboardScreen(library: library),
+        builder: (_) => HomeDashboardScreen(library: library, userState: userState ?? UserSubscriptionState()),
       ),
     );
   }

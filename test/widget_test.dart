@@ -7,6 +7,7 @@ import 'package:loopi_web/main.dart';
 import 'package:loopi_web/models/routine_models.dart';
 import 'package:loopi_web/screens/home_dashboard_screen.dart';
 import 'package:loopi_web/state/routine_library.dart';
+import 'package:loopi_web/state/user_state.dart';
 import 'package:loopi_web/widgets/app_logo.dart';
 import 'package:loopi_web/widgets/save_routine_dialog.dart';
 
@@ -89,7 +90,7 @@ void main() {
         path: 'assets/translations',
         fallbackLocale: const Locale('en'),
         startLocale: const Locale('ko'),
-        child: HomeDashboardScreen(library: library),
+        child: HomeDashboardScreen(library: library, userState: UserSubscriptionState()),
       ),
     );
     await tester.pumpAndSettle();

@@ -4,11 +4,13 @@ import 'package:file_picker/file_picker.dart';
 
 import '../models/routine_models.dart';
 import '../state/routine_library.dart';
+import '../state/user_state.dart';
 import '../theme/loopi_colors.dart';
 import '../utils/time_format.dart';
 import '../widgets/app_logo.dart';
 import '../widgets/favorite_icon_button.dart';
 import 'link_studio_screen.dart';
+import 'my_profile_screen.dart';
 import 'practice_mode_screen.dart';
 import 'practice_screen.dart';
 import 'routine_player_screen.dart';
@@ -47,9 +49,10 @@ class CommunityFeedStore extends ChangeNotifier {
 }
 
 class HomeDashboardScreen extends StatefulWidget {
-  const HomeDashboardScreen({super.key, required this.library});
+  const HomeDashboardScreen({super.key, required this.library, required this.userState});
 
   final RoutineLibrary library;
+  final UserSubscriptionState userState;
 
   @override
   State<HomeDashboardScreen> createState() => _HomeDashboardScreenState();
@@ -181,11 +184,9 @@ class _HomeDashboardScreenState extends State<HomeDashboardScreen> {
   }
 
   void _openPracticeView(Widget view) {
-    setState(() {
-      _selectedPracticeRoutine = null;
-      _selectedPracticeView = view;
-      _tabIndex = 3;
-    });
+    // Push as a real route (rather than swapping the embedded IndexedStack
+    // tab) so the view's back button can safely pop back to this screen.
+    Navigator.of(context).push(MaterialPageRoute<void>(builder: (_) => view));
   }
 
   void _onTabSelected(int index) {
@@ -212,7 +213,11 @@ class _HomeDashboardScreenState extends State<HomeDashboardScreen> {
             icon: const Icon(Icons.notifications_none_rounded),
           ),
           IconButton(
-            onPressed: () => setState(() => _tabIndex = 4),
+            onPressed: () => Navigator.of(context).push(
+              MaterialPageRoute<void>(
+                builder: (_) => MyProfileScreen(userState: widget.userState, library: widget.library),
+              ),
+            ),
             tooltip: '프로필',
             icon: const Icon(Icons.account_circle_outlined),
           ),

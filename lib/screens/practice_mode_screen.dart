@@ -57,6 +57,9 @@ class _PracticeModeScreenState extends State<PracticeModeScreen> {
   Completer<void>? _delayCompleter;
   bool _isPlaying = false;
   bool _isSeeking = false;
+  // Guards segment/routine transitions so a burst of position callbacks can't
+  // re-enter the advance logic while a previous transition is still in flight.
+  bool _isAdvancing = false;
   String? _mediaObjectUrl;
 
   bool get _inWidgetTest =>
@@ -182,6 +185,7 @@ class _PracticeModeScreenState extends State<PracticeModeScreen> {
     _playsRemaining = _currentRoutine.segments.first.loopCount;
     _ignoreUntil = DateTime.now().add(const Duration(milliseconds: 600));
     _isSeeking = true;
+    _isAdvancing = false;
     setState(() {});
     if (_inWidgetTest) return;
 
@@ -281,6 +285,7 @@ class _PracticeModeScreenState extends State<PracticeModeScreen> {
     _playsRemaining = _currentRoutine.segments[index].loopCount;
     _ignoreUntil = DateTime.now().add(const Duration(milliseconds: 500));
     _isSeeking = true;
+    _isAdvancing = false;
     setState(() {});
     if (_inWidgetTest) return;
     try {
@@ -415,8 +420,10 @@ class _PracticeModeScreenState extends State<PracticeModeScreen> {
     await _startRoutine(next, immediate: true);
   }
 
+  // Detects end-of-segment: `time + 0.12 < segmentEnd` means "not there yet", so
+  // this fires once `time >= segmentEnd - 0.12`, tolerant of ms/float rounding.
   void _onTime(double time) {
-    if (!_ready || _delayPending || _isSeeking) return;
+    if (!_ready || _delayPending || _isSeeking || _isAdvancing) return;
     if (_ignoreUntil != null && DateTime.now().isBefore(_ignoreUntil!)) return;
 
     final segmentStart = _segment.startSec;
@@ -424,41 +431,53 @@ class _PracticeModeScreenState extends State<PracticeModeScreen> {
     if (time < segmentStart - 0.1) return;
     if (time + 0.12 < segmentEnd) return;
 
-    _ignoreUntil = DateTime.now().add(const Duration(days: 1));
-    final delaySec = _segment.delaySec;
+    unawaited(_advancePastSegment());
+  }
 
-    if (_segment.loopCount == kInfiniteLoop) {
-      _replayWithDelay(delaySec);
-      return;
-    }
-    _playsRemaining -= 1;
-    if (_playsRemaining > 0) {
-      _replayWithDelay(delaySec);
-      return;
-    }
-    if (_segmentIndex + 1 < _currentRoutine.segments.length) {
-      _startSegmentWithDelay(_segmentIndex + 1, delaySec);
-      return;
-    }
-    if (_isGroupPlayback) {
-      _advanceToNextRoutine(delaySec);
-      return;
-    }
-    _pollTimer?.cancel();
-    if (!_inWidgetTest) {
-      try {
-        switch (_currentRoutine.sourceType) {
-          case SourceType.youtube:
-            _youtubePlayer.pauseVideo();
-            break;
-          case SourceType.localVideo:
-            _videoPlayer?.pause();
-            break;
-          case SourceType.audio:
-            _audioPlayer?.pause();
-            break;
-        }
-      } catch (_) {}
+  /// Repeats the current segment, moves on to the next segment/routine, or
+  /// stops once everything is done. try/finally guarantees `_isAdvancing`
+  /// always clears, even if an awaited player call throws.
+  Future<void> _advancePastSegment() async {
+    if (_isAdvancing) return;
+    _isAdvancing = true;
+    try {
+      final delaySec = _segment.delaySec;
+
+      if (_segment.loopCount == kInfiniteLoop) {
+        await _replayWithDelay(delaySec);
+        return;
+      }
+      _playsRemaining -= 1;
+      if (_playsRemaining > 0) {
+        await _replayWithDelay(delaySec);
+        return;
+      }
+      if (_segmentIndex + 1 < _currentRoutine.segments.length) {
+        await _startSegmentWithDelay(_segmentIndex + 1, delaySec);
+        return;
+      }
+      if (_isGroupPlayback) {
+        await _advanceToNextRoutine(delaySec);
+        return;
+      }
+      _pollTimer?.cancel();
+      if (!_inWidgetTest) {
+        try {
+          switch (_currentRoutine.sourceType) {
+            case SourceType.youtube:
+              await _youtubePlayer.pauseVideo();
+              break;
+            case SourceType.localVideo:
+              await _videoPlayer?.pause();
+              break;
+            case SourceType.audio:
+              await _audioPlayer?.pause();
+              break;
+          }
+        } catch (_) {}
+      }
+    } finally {
+      _isAdvancing = false;
     }
   }
 
