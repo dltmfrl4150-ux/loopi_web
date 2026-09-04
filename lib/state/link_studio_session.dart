@@ -52,6 +52,12 @@ class LinkStudioSession extends ChangeNotifier {
     if (duration <= 0) return;
     if ((duration - _videoDuration).abs() < 0.05) return;
     _videoDuration = duration;
+
+    // Update first segment's endSec if it's still at default value (30.0)
+    if (_segments.isNotEmpty && _segments[0].endSec == 30.0) {
+      _segments[0] = _segments[0].copyWith(endSec: duration);
+    }
+
     for (var i = 0; i < _segments.length; i++) {
       _segments[i] = _clampSegment(_segments[i]);
     }

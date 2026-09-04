@@ -43,7 +43,7 @@ class RoutineSegment {
     required this.endSec,
     this.speed = 1.0,
     this.loopCount = 1,
-    this.delaySec = 3,
+    this.delaySec = 0,
   });
 
   final String id;
@@ -60,7 +60,7 @@ class RoutineSegment {
       endSec: (json['endSec'] as num?)?.toDouble() ?? 30,
       speed: (json['speed'] as num?)?.toDouble() ?? 1.0,
       loopCount: (json['loopCount'] as num?)?.toInt() ?? 1,
-      delaySec: (json['delaySec'] as num?)?.toInt() ?? 3,
+      delaySec: (json['delaySec'] as num?)?.toInt() ?? 0,
     );
   }
 

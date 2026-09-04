@@ -34,7 +34,11 @@ class _FavoriteButtonState extends State<FavoriteButton> {
   void _toggle() {
     final next = !_isFavorite;
     setState(() => _isFavorite = next);
-    unawaited(Future<void>.sync(() => widget.onChanged(next)));
+    
+    // UI(보라색 하트)가 즉각적으로 먼저 렌더링되도록 실행 순서를 다음 프레임으로 양보
+    Future.delayed(Duration.zero, () {
+      widget.onChanged(next);
+    });
   }
 
   @override

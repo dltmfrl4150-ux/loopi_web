@@ -10,8 +10,6 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:video_player/video_player.dart';
 import 'package:audioplayers/audioplayers.dart';
-// ignore: avoid_web_libraries_in_flutter
-import 'dart:html' as html;
 
 import '../models/routine_models.dart';
 import '../state/link_studio_session.dart';
@@ -88,12 +86,14 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
   int _routineSessionId = 0;
   DateTime? _lastSeekAt;
 
-  bool _isLoopTransitioning = false;
+  bool _isSeeking = false;
+  bool _isAdvancing = false;
+  DateTime? _ignoreUntil;
   String _videoUrl = kDefaultVideoUrl;
   String _videoId = 'M7lc1UVf-VE';
   RangeValues? _rangeBeforeDrag;
   bool _saveDialogOpen = false;
-  bool _delayPending = false;
+
   int _highlightedSection = 0;
   Completer<void>? _delayCompleter;
   String? _lastDetectedClipboardText;
@@ -311,24 +311,23 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
   void _onTimeFocusChanged() {
     for (var i = 0; i < _session.segments.length; i++) {
       if (!_startFocus[i].hasFocus) {
-        _commitTimeField(index: i, isStart: true);
+        _commitTimeField(index: i, isStart: true, allowSeek: false);
       }
       if (!_endFocus[i].hasFocus) {
-        _commitTimeField(index: i, isStart: false);
+        _commitTimeField(index: i, isStart: false, allowSeek: false);
       }
     }
   }
 
   void _onTimeChanged(String value, int index, bool isStart) {
     if (value.isEmpty) return;
-    
     final parts = value.split(':');
     if (parts.length == 2) {
       try {
         final minutes = int.parse(parts[0]);
         final seconds = int.parse(parts[1]);
         if (minutes >= 0 && seconds >= 0 && seconds < 60) {
-          _commitTimeField(index: index, isStart: isStart);
+          _commitTimeField(index: index, isStart: isStart, allowSeek: true);
         }
       } catch (_) {}
     }
@@ -336,6 +335,7 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
 
   Future<void> _seekTo(double seconds, {bool force = false}) async {
     if (_inWidgetTest) return;
+    debugPrint('[SEEK] seconds=$seconds');
     final now = DateTime.now();
     if (!force &&
         _lastSeekAt != null &&
@@ -343,7 +343,7 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
       return;
     }
     _lastSeekAt = now;
-    
+
     try {
       switch (_session.sourceType) {
         case SourceType.youtube:
@@ -351,14 +351,6 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
           break;
         case SourceType.localVideo:
           await _videoPlayer?.seekTo(Duration(milliseconds: (seconds * 1000).toInt()));
-          if (kIsWeb) {
-            final videos = html.document.querySelectorAll('video');
-            for (final element in videos) {
-              if (element is html.VideoElement) {
-                element.currentTime = seconds;
-              }
-            }
-          }
           break;
         case SourceType.audio:
           await _audioPlayer?.seek(Duration(milliseconds: (seconds * 1000).toInt()));
@@ -376,42 +368,9 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
           break;
         case SourceType.localVideo:
           await _videoPlayer?.setPlaybackSpeed(speed);
-          if (kIsWeb) {
-            final videos = html.document.querySelectorAll('video');
-            for (final element in videos) {
-              if (element is html.VideoElement) {
-                element.playbackRate = speed;
-              }
-            }
-          }
           break;
         case SourceType.audio:
           await _audioPlayer?.setPlaybackRate(speed);
-          break;
-      }
-    } catch (_) {}
-  }
-
-  Future<void> _play() async {
-    if (_inWidgetTest) return;
-    try {
-      switch (_session.sourceType) {
-        case SourceType.youtube:
-          await _youtubePlayer.playVideo();
-          break;
-        case SourceType.localVideo:
-          await _videoPlayer?.play();
-          if (kIsWeb) {
-            final videos = html.document.querySelectorAll('video');
-            for (final element in videos) {
-              if (element is html.VideoElement) {
-                element.play();
-              }
-            }
-          }
-          break;
-        case SourceType.audio:
-          await _audioPlayer?.resume();
           break;
       }
     } catch (_) {}
@@ -426,7 +385,6 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
           break;
         case SourceType.localVideo:
           await _videoPlayer?.pause();
-          _forceWebVideoPause();
           break;
         case SourceType.audio:
           await _audioPlayer?.pause();
@@ -449,49 +407,20 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
     }
   }
 
-  void _forceWebVideoSeekAndPlay(double startSec, double speed) {
-    if (kIsWeb) {
-      try {
-        final videos = html.document.querySelectorAll('video');
-        for (final element in videos) {
-          if (element is html.VideoElement) {
-            element.currentTime = startSec;
-            element.playbackRate = speed;
-            element.play();
-          }
-        }
-      } catch (e) {
-        debugPrint('Native DOM control error: $e');
-      }
-    }
-  }
 
-  void _forceWebVideoPause() {
-    if (kIsWeb) {
-      try {
-        final videos = html.document.querySelectorAll('video');
-        for (final element in videos) {
-          if (element is html.VideoElement) {
-            element.pause();
-          }
-        }
-      } catch (e) {
-        debugPrint('Native DOM pause error: $e');
-      }
-    }
-  }
 
-  void _commitTimeField({required int index, required bool isStart}) {
-    _routineSessionId++;
-    _routineTimer?.cancel();
-    _loopPlaybackTimer?.cancel();
-    _playbackMonitorTimer?.cancel();
-    
+  void _commitTimeField({required int index, required bool isStart, bool allowSeek = true}) {
     final controller = isStart ? _startControllers[index] : _endControllers[index];
     final ok = _session.applyManualTime(index: index, isStart: isStart, text: controller.text);
     final segment = _session.segments[index];
     controller.text = formatMmSs(isStart ? segment.startSec : segment.endSec);
-    if (ok && index == _session.selectedIndex) {
+    
+    // allowSeek가 false이거나 테스트(루틴 재생) 중이면 절대 비디오 위치를 건드리지 않음
+    if (ok && index == _session.selectedIndex && allowSeek && !_session.isTesting) {
+      _routineSessionId++;
+      _routineTimer?.cancel();
+      _loopPlaybackTimer?.cancel();
+      _playbackMonitorTimer?.cancel();
       _seekTo(isStart ? segment.startSec : segment.endSec, force: true);
     }
   }
@@ -693,17 +622,17 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
       );
       return;
     }
-    
+
     _routineSessionId++;
     _routineTimer?.cancel();
     _loopPlaybackTimer?.cancel();
     _playbackMonitorTimer?.cancel();
-    _isLoopTransitioning = false;
-    
+    _isSeeking = false;
+    _isAdvancing = false;
+
     final activeIndex = _session.selectedIndex.clamp(0, _session.segments.length - 1);
     _session.selectSegment(activeIndex);
     _session.beginTest(startIndex: activeIndex);
-    _delayPending = false;
     await _jumpToSegment(activeIndex);
   }
 
@@ -722,130 +651,159 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
     final double startSec = segment.startSec;
     final double endSec = segment.endSec;
     final double speed = segment.speed;
+    final int delaySec = segment.delaySec;
+
+
+    debugPrint('[SEGMENT] start=$startSec end=$endSec');
 
     if (endSec <= startSec) return;
 
-    try {
-      // 1. 순서 교체: 재생(Play)보다 이동(Seek)을 무조건 1순위로 먼저 쏴야 명령이 씹히지 않습니다.
-      _seekTo(startSec, force: true);
-      _applySpeed(speed);
+    _ignoreUntil = DateTime.now().add(const Duration(milliseconds: 500));
+    _isSeeking = true;
+    _isAdvancing = false;
+    setState(() {});
 
-      if (kIsWeb && _session.sourceType == SourceType.localVideo) {
-        try {
-          final videos = html.document.querySelectorAll('video');
-          for (final element in videos) {
-            if (element is html.VideoElement) {
-              element.currentTime = startSec;
-              element.playbackRate = speed;
-            }
-          }
-        } catch (_) {}
+    if (_inWidgetTest) return;
+
+    try {
+      // 딜레이 시간 계산: 기본 120ms + (사용자 설정 딜레이 초 * 1000)ms
+      final waitDuration = Duration(milliseconds: 120 + (delaySec * 1000));
+
+      switch (_session.sourceType) {
+        case SourceType.youtube:
+          await _youtubePlayer.setPlaybackRate(speed);
+          await _seekTo(startSec, force: true);
+          await Future<void>.delayed(waitDuration);
+          _isSeeking = false;
+          await _youtubePlayer.playVideo();
+          break;
+        case SourceType.localVideo:
+          await _videoPlayer?.setPlaybackSpeed(speed);
+          await _seekTo(startSec, force: true);
+          await Future<void>.delayed(waitDuration);
+          _isSeeking = false;
+          await _videoPlayer?.play();
+          break;
+        case SourceType.audio:
+          await _audioPlayer?.setPlaybackRate(speed);
+          await _seekTo(startSec, force: true);
+          await Future<void>.delayed(waitDuration);
+          _isSeeking = false;
+          await _audioPlayer?.resume();
+          break;
+      }
+    } catch (_) {
+      _isSeeking = false;
+    }
+
+    _playbackMonitorTimer = Timer.periodic(const Duration(milliseconds: 120), (timer) async {
+      if (_routineSessionId != currentSession || !_session.isTesting || !mounted) {
+        timer.cancel();
+        return;
       }
 
-      // 2. 이동 명령이 확실히 처리되도록 0.1초 텀을 주고 재생 지시
-      Future.delayed(const Duration(milliseconds: 100), () {
-        if (_routineSessionId == currentSession && mounted && _session.isTesting) {
-          _play();
-          if (kIsWeb && _session.sourceType == SourceType.localVideo) {
-            try {
-              final videos = html.document.querySelectorAll('video');
-              for (final element in videos) {
-                if (element is html.VideoElement) {
-                  element.play();
-                }
-              }
-            } catch (_) {}
-          }
-        }
-      });
+      if (_isSeeking || _isAdvancing) return;
 
-      bool hasActuallyStarted = false;
-      int tickCount = 0;
+      try {
+        final time = await _getCurrentTime();
+        _onTime(time, startSec, endSec);
+      } catch (_) {}
+    });
+  }
 
-      // 3. 타이머 모니터링
-      _playbackMonitorTimer = Timer.periodic(const Duration(milliseconds: 50), (timer) async {
-        if (_routineSessionId != currentSession || !_session.isTesting || !mounted) {
-          timer.cancel();
-          return;
-        }
+  void _onTime(double time, double startSec, double endSec) {
+    if (_isSeeking || _isAdvancing) return;
+    if (_ignoreUntil != null && DateTime.now().isBefore(_ignoreUntil!)) return;
 
-        tickCount++;
+    if (time < startSec - 0.1) return;
+    if (time + 0.12 < endSec) return;
 
-        try {
-          final currentPos = await _getCurrentTime();
-
-          // ✨ 자가 치유(Self-healing) 로직: 실제 시작 지점으로 갔는지 도장 찍기
-          if (!hasActuallyStarted) {
-            // 루프가 0.5초 미만으로 매우 짧은 경우를 대비한 안전 범위 계산
-            final safeEndCheck = (endSec - startSec < 0.5) ? endSec : endSec - 0.2;
-            
-            // 현재 위치가 정상적으로 startSec 부근으로 리셋되었는지 확인
-            if (currentPos >= startSec - 1.0 && currentPos < safeEndCheck) {
-              hasActuallyStarted = true; // 정상 이동 완료 도장 쾅!
-            } else {
-              // 0.5초(10틱)가 지나도록 시작점으로 안 갔다면 브라우저가 이동 명령을 씹은 것! 강제 재시도
-              if (tickCount > 10 && tickCount % 10 == 0) {
-                _seekTo(startSec, force: true);
-                _play();
-              }
-              return; // 도장을 받기 전까지는 절대 종료 검사를 하지 않음 (끝까지 뚫고 가는 버그 원천 차단)
-            }
-          }
-
-          // 확실하게 구간 안에 진입한 후부터 종료 지점(0.05초 오차) 감시
-          if (currentPos >= endSec - 0.05) {
-            timer.cancel();
-            debugPrint('⏹️ [Loop Completed] Reached $currentPos (End: $endSec)');
-
-            _pause();
-            if (kIsWeb && _session.sourceType == SourceType.localVideo) {
-              try {
-                final videos = html.document.querySelectorAll('video');
-                for (final element in videos) {
-                  if (element is html.VideoElement) {
-                    element.pause();
-                  }
-                }
-              } catch (_) {}
-            }
-
-            _advanceLoopSegment();
-          }
-        } catch (_) {}
-      });
-    } catch (error) {
-      debugPrint('❌ [Start Routine Error]: $error');
-    }
+    unawaited(_advanceLoopSegment());
   }
   Future<void> _advanceLoopSegment() async {
-    if (!_session.isTesting || !mounted) return;
-    final segment = _session.testSegment;
-    final delaySec = segment.delaySec;
-    final result = _session.onLoopHit();
-    switch (result) {
-      case LoopHitResult.seekToStart:
-        debugPrint('🔁 [Repeat Loop] Count: ${_session.playsRemaining}');
-        break;
-      case LoopHitResult.nextSegment:
-        debugPrint('⏭️ [Next Loop] Moving to next segment: ${_session.testSegmentIndex}');
-        break;
-      case LoopHitResult.finished:
-        debugPrint('🏁 [Routine Finished]');
-        _forceWebVideoPause();
-        await _stopTestPlayback();
-        return;
+    if (_isAdvancing) return;
+    _isAdvancing = true;
+
+    try {
+      if (!_session.isTesting || !mounted) return;
+
+      final segment = _session.testSegment;
+      final delaySec = segment.delaySec;
+      final result = _session.onLoopHit();
+
+      switch (result) {
+        case LoopHitResult.seekToStart:
+          debugPrint('🔁 [Repeat Loop] Count: ${_session.playsRemaining}');
+          await _replayWithDelay(delaySec);
+          break;
+        case LoopHitResult.nextSegment:
+          debugPrint('⏭️ [Next Loop] Moving to next segment: ${_session.testSegmentIndex}');
+          await _startSegmentWithDelay(_session.testSegmentIndex, delaySec);
+          break;
+        case LoopHitResult.finished:
+          debugPrint('🏁 [Routine Finished]');
+          await _stopTestPlayback();
+          break;
+      }
+    } finally {
+      _isAdvancing = false;
     }
+  }
+
+  Future<void> _replayWithDelay(int delaySec) async {
     await _waitDelay(delaySec);
     if (!_session.isTesting || !mounted) return;
-    
-    _routineSessionId++;
-    _playbackMonitorTimer?.cancel();
-    await _jumpToSegment(_session.testSegmentIndex);
+    await _replayCurrent();
+  }
+
+  Future<void> _startSegmentWithDelay(int index, int delaySec) async {
+    await _waitDelay(delaySec);
+    if (!_session.isTesting || !mounted) return;
+    await _jumpToSegment(index);
+  }
+
+  Future<void> _replayCurrent() async {
+    _ignoreUntil = DateTime.now().add(const Duration(milliseconds: 280));
+    if (_inWidgetTest) return;
+    _isSeeking = true;
+
+    try {
+      final segment = _session.testSegment;
+      switch (_session.sourceType) {
+        case SourceType.youtube:
+          await _youtubePlayer.setPlaybackRate(segment.speed);
+          await _seekTo(segment.startSec, force: true);
+          break;
+        case SourceType.localVideo:
+          await _videoPlayer?.setPlaybackSpeed(segment.speed);
+          await _seekTo(segment.startSec, force: true);
+          break;
+        case SourceType.audio:
+          await _audioPlayer?.setPlaybackRate(segment.speed);
+          await _seekTo(segment.startSec, force: true);
+          break;
+      }
+    } catch (_) {}
+
+    _isSeeking = false;
+
+    try {
+      switch (_session.sourceType) {
+        case SourceType.youtube:
+          await _youtubePlayer.playVideo();
+          break;
+        case SourceType.localVideo:
+          await _videoPlayer?.play();
+          break;
+        case SourceType.audio:
+          await _audioPlayer?.resume();
+          break;
+      }
+    } catch (_) {}
   }
 
   Future<void> _waitDelay(int delaySec) async {
     if (delaySec <= 0 || _inWidgetTest) return;
-    _delayPending = true;
     try {
       await _pause();
     } catch (_) {}
@@ -856,7 +814,6 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
       if (pending != null && !pending.isCompleted) pending.complete();
     });
     await _delayCompleter!.future;
-    _delayPending = false;
     _delayCompleter = null;
   }
 
@@ -864,20 +821,19 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
     _routineSessionId++;
     _delayTimer?.cancel();
     _delayTimer = null;
-    _delayPending = false;
     _loopPlaybackTimer?.cancel();
     _loopPlaybackTimer = null;
     _routineTimer?.cancel();
     _routineTimer = null;
     _playbackMonitorTimer?.cancel();
     _playbackMonitorTimer = null;
-    _isLoopTransitioning = false;
+    _isSeeking = false;
+    _isAdvancing = false;
     _session.stopTest();
     _highlightedSection = _session.selectedIndex;
     if (!_inWidgetTest) {
       try {
         await _pause();
-        _forceWebVideoPause();
         await _applySpeed(_session.active.speed);
         await _seekTo(_session.active.startSec, force: true);
       } catch (_) {}
@@ -1563,8 +1519,8 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
           if (!enabled) return;
           _session.selectSegment(index);
         },
-        onSubmitted: (_) => _commitTimeField(index: index, isStart: isStart),
-        onEditingComplete: () => _commitTimeField(index: index, isStart: isStart),
+        onSubmitted: (_) => _commitTimeField(index: index, isStart: isStart, allowSeek: true),
+        onEditingComplete: () => _commitTimeField(index: index, isStart: isStart, allowSeek: true),
         onChanged: (value) => _onTimeChanged(value, index, isStart),
       ),
     );

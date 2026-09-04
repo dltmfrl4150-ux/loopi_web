@@ -289,29 +289,37 @@ class _PracticeModeScreenState extends State<PracticeModeScreen> {
     setState(() {});
     if (_inWidgetTest) return;
     try {
+      // ✨ 세그먼트의 delaySec를 읽어와 대기 시간 계산
+      final delay = _currentRoutine.segments[index].delaySec;
+      final waitTime = Duration(milliseconds: 120 + (delay * 1000));
+
       switch (_currentRoutine.sourceType) {
         case SourceType.youtube:
+          await _youtubePlayer.pauseVideo(); // ✨ 대기 전 일시정지
           await _youtubePlayer.setPlaybackRate(_currentRoutine.segments[index].speed);
           await _youtubePlayer.seekTo(seconds: _currentRoutine.segments[index].startSec, allowSeekAhead: true);
-          await Future<void>.delayed(const Duration(milliseconds: 120));
+          await Future<void>.delayed(waitTime);
           _isSeeking = false;
-          await _youtubePlayer.playVideo();
+          await _youtubePlayer.playVideo(); // ✨ 대기 후 다시 재생
           _isPlaying = true;
           break;
         case SourceType.localVideo:
+          await _videoPlayer?.pause(); // ✨ 대기 전 일시정지
           await _videoPlayer?.setPlaybackSpeed(_currentRoutine.segments[index].speed);
           await _videoPlayer?.seekTo(Duration(milliseconds: (_currentRoutine.segments[index].startSec * 1000).toInt()));
-          await Future<void>.delayed(const Duration(milliseconds: 120));
+          await Future<void>.delayed(waitTime);
           _isSeeking = false;
-          await _videoPlayer?.play();
+          await _videoPlayer?.play(); // ✨ 대기 후 다시 재생
           _isPlaying = true;
           break;
+        // (audio 부분도 동일하게 pause() 추가)
         case SourceType.audio:
+          await _audioPlayer?.pause(); // ✨ 대기 전 일시정지
           await _audioPlayer?.setPlaybackRate(_currentRoutine.segments[index].speed);
           await _audioPlayer?.seek(Duration(milliseconds: (_currentRoutine.segments[index].startSec * 1000).toInt()));
-          await Future<void>.delayed(const Duration(milliseconds: 120));
+          await Future<void>.delayed(waitTime); // ✨ waitTime으로 변경
           _isSeeking = false;
-          await _audioPlayer?.resume();
+          await _audioPlayer?.resume(); // ✨ 대기 후 다시 재생 (audio는 주로 resume 사용)
           _isPlaying = true;
           break;
       }
@@ -443,38 +451,29 @@ class _PracticeModeScreenState extends State<PracticeModeScreen> {
     try {
       final delaySec = _segment.delaySec;
 
+      // 1. 무한 반복 모드인 경우 현재 구간 무한 반복
       if (_segment.loopCount == kInfiniteLoop) {
         await _replayWithDelay(delaySec);
         return;
       }
-      _playsRemaining -= 1;
-      if (_playsRemaining > 0) {
+
+      // 2. 지정된 반복 횟수가 남아있는 경우 현재 구간 재반복
+      if (_playsRemaining > 1) {
+        _playsRemaining--;
         await _replayWithDelay(delaySec);
         return;
       }
-      if (_segmentIndex + 1 < _currentRoutine.segments.length) {
-        await _startSegmentWithDelay(_segmentIndex + 1, delaySec);
-        return;
-      }
-      if (_isGroupPlayback) {
-        await _advanceToNextRoutine(delaySec);
-        return;
-      }
-      _pollTimer?.cancel();
-      if (!_inWidgetTest) {
-        try {
-          switch (_currentRoutine.sourceType) {
-            case SourceType.youtube:
-              await _youtubePlayer.pauseVideo();
-              break;
-            case SourceType.localVideo:
-              await _videoPlayer?.pause();
-              break;
-            case SourceType.audio:
-              await _audioPlayer?.pause();
-              break;
-          }
-        } catch (_) {}
+
+      // 3. 반복 횟수를 다 채운 경우 다음 구간(B, C...)으로 전진!
+      final nextIndex = _segmentIndex + 1;
+      if (nextIndex < _currentRoutine.segments.length) {
+        await _startSegment(nextIndex);
+      } else {
+        // 마지막 구간까지 완료되면 재생을 정지합니다.
+        setState(() => _isPlaying = false);
+        _youtubePlayer.pauseVideo();
+        _videoPlayer?.pause();
+        _audioPlayer?.pause();
       }
     } finally {
       _isAdvancing = false;
@@ -577,6 +576,13 @@ class _PracticeModeScreenState extends State<PracticeModeScreen> {
           _audioPlayer?.pause();
           break;
       }
+      // ✨ 실질적으로 딜레이 초만큼 대기하는 코드가 빠져 있었습니다!
+      await Future.delayed(Duration(seconds: delaySec));
+    } catch (_) {
+    } finally {
+      _delayPending = false;
+    }
+  
     } catch (_) {}
     _delayCompleter = Completer<void>();
     _delayTimer?.cancel();

@@ -912,27 +912,64 @@ class _MotionComparisonViewerState extends State<MotionComparisonViewer> {
     final segment = widget.segments[index];
     setState(() => _segmentIndex = index);
     try {
-      await widget.original?.setPlaybackSpeed(segment.speed);
-      await widget.originalYoutube?.setPlaybackRate(segment.speed);
-      await widget.original?.seekTo(Duration(milliseconds: (segment.startSec * 1000).round()));
-      if (widget.originalYoutube != null) {
-        await widget.originalYoutube!.seekTo(seconds: segment.startSec, allowSeekAhead: true);
-      }
-      if (_hasRecorded) {
-        final span = _rangeEnd - _rangeStart;
-        final progress = span > 0 ? ((segment.startSec - _rangeStart) / span).clamp(0.0, 1.0) : 0.0;
-        final recordedTarget = progress * _recordedDurationSeconds;
-        await widget.recorded?.seekTo(Duration(milliseconds: (recordedTarget * 1000).round()));
-        if (mounted) setState(() => _position = recordedTarget.clamp(_minPosition, _maxPosition));
-      } else if (mounted) {
-        setState(() => _position = segment.startSec.clamp(_minPosition, _maxPosition));
-      }
-    } catch (_) {}
+        // ✨ 1. 딜레이 시간 계산
+        final delay = segment.delaySec;
+        final waitTime = Duration(milliseconds: 120 + (delay * 1000));
+
+        // ✨ 2. 탐색(Seek) 전 모든 플레이어 일시정지 (재생 중 넘어가는 것 방지)
+        await widget.original?.pause();
+        widget.originalYoutube?.pauseVideo();
+        await widget.recorded?.pause();
+
+        // --- 기존 속도 설정 및 위치 이동 코드 (그대로 유지) ---
+        await widget.original?.setPlaybackSpeed(segment.speed);
+        await widget.originalYoutube?.setPlaybackRate(segment.speed);
+        await widget.original?.seekTo(Duration(milliseconds: (segment.startSec * 1000).round()));
+        if (widget.originalYoutube != null) {
+          await widget.originalYoutube!.seekTo(seconds: segment.startSec, allowSeekAhead: true);
+        }
+        
+        if (_hasRecorded) {
+          final span = _rangeEnd - _rangeStart;
+          final progress = span > 0 ? ((segment.startSec - _rangeStart) / span).clamp(0.0, 1.0) : 0.0;
+          final recordedTarget = progress * _recordedDurationSeconds;
+          await widget.recorded?.seekTo(Duration(milliseconds: (recordedTarget * 1000).round()));
+          if (mounted) setState(() => _position = recordedTarget.clamp(_minPosition, _maxPosition));
+        } else if (mounted) {
+          setState(() => _position = segment.startSec.clamp(_minPosition, _maxPosition));
+        }
+        // --------------------------------------------------
+
+        // ✨ 3. 위치 이동을 마친 후 설정된 시간만큼 멈춰서 대기
+        await Future.delayed(waitTime);
+
+        // ✨ 4. 대기가 끝난 뒤, 원래 재생 중(_playing) 상태였다면 모두 다시 재생
+        if (_playing) {
+          await widget.original?.play();
+          widget.originalYoutube?.playVideo();
+          await widget.recorded?.play();
+        }
+
+      } catch (_) {}
   }
 
   Future<void> _loopBackToStart() async {
-    await _seekBoth(_minPosition);
+    // 1. 다음 구간으로 인덱스 증가 (끝이면 다시 A구간으로 순환)
+    final nextIndex = _segmentIndex + 1;
+    if (nextIndex < widget.segments.length) {
+      await _selectSegment(nextIndex);
+    } else {
+      // 루틴이 끝났거나 녹화된 지점까지만 재생 후 모두 정지
+      if (mounted) setState(() => _playing = false);
+      widget.original?.pause();
+      widget.originalYoutube?.pauseVideo();
+      widget.recorded?.pause();
+      return; // 재생 코드가 실행되지 않도록 여기서 함수 종료
+    }
+
+    // 2. 이동 후 재생 상태 유지
     if (!_playing) return;
+    // ... 아래 기존 재생(play) 코드들은 그대로 유지
     if (widget.original != null) {
       await widget.original!.play();
     }
@@ -1041,7 +1078,12 @@ class _MotionComparisonViewerState extends State<MotionComparisonViewer> {
           return ChoiceChip(
             label: Text(sectionLabelForIndex(index)),
             selected: selected,
-            onSelected: (_) => _selectSegment(index),
+            onSelected: (_) {
+              setState(() {
+                _segmentIndex = index;
+              });
+              _selectSegment(index);
+            },
             selectedColor: LoopiColors.purple,
             labelStyle: TextStyle(
               color: selected ? Colors.white : null,
