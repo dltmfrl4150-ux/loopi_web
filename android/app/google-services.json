@@ -1,0 +1,48 @@
+{
+  "project_info": {
+    "project_number": "733409684438",
+    "project_id": "loopi-app-6fdfe",
+    "storage_bucket": "loopi-app-6fdfe.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:733409684438:android:2e6d247771621b81fb1277",
+        "android_client_info": {
+          "package_name": "com.example.loopi_web"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCZ2P7z83y4Z47qA7gMbajfT6k7_KWygqU"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:733409684438:android:0deb9ec91babaa7afb1277",
+        "android_client_info": {
+          "package_name": "com.mycompany.loopi"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCZ2P7z83y4Z47qA7gMbajfT6k7_KWygqU"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

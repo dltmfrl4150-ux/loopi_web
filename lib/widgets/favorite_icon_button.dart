@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:easy_localization/easy_localization.dart';
 import 'package:flutter/material.dart';
 
 import '../theme/loopi_colors.dart';
@@ -45,7 +46,7 @@ class _FavoriteButtonState extends State<FavoriteButton> {
   Widget build(BuildContext context) {
     return IconButton(
       onPressed: _toggle,
-      tooltip: widget.tooltip ?? (_isFavorite ? '즐겨찾기 해제' : '즐겨찾기'),
+      tooltip: widget.tooltip ?? (_isFavorite ? 'common.unfavorite'.tr() : 'common.favorite'.tr()),
       color: _isFavorite ? LoopiColors.purple : null,
       icon: Icon(_isFavorite ? Icons.bookmark : Icons.bookmark_border),
     );

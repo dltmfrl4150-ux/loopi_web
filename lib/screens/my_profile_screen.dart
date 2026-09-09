@@ -1,26 +1,191 @@
+import 'package:easy_localization/easy_localization.dart';
 import 'package:flutter/material.dart';
+import 'package:image_picker/image_picker.dart';
 
+import '../services/auth_service.dart';
+import '../services/database_service.dart';
+import '../services/storage_service.dart';
 import '../state/routine_library.dart';
 import '../state/user_state.dart';
 import '../theme/loopi_colors.dart';
+import '../widgets/cached_remote_image.dart';
 import 'paywall_screen.dart';
 import 'social_login_screen.dart';
+import 'user_profile_screen.dart';
 
 class MyProfileScreen extends StatefulWidget {
-  const MyProfileScreen({super.key, required this.userState, required this.library});
+  const MyProfileScreen({
+    super.key,
+    required this.userState,
+    required this.library,
+    this.onSignedOut,
+    this.onOpenUserFeed,
+  });
 
   final UserSubscriptionState userState;
   final RoutineLibrary library;
+  final Future<void> Function()? onSignedOut;
+  final void Function(String authorId, String authorName)? onOpenUserFeed;
 
   @override
   State<MyProfileScreen> createState() => _MyProfileScreenState();
 }
 
 class _MyProfileScreenState extends State<MyProfileScreen> {
+  final DatabaseService _database = DatabaseService();
+  final AuthService _auth = AuthService();
+  bool _uploadingPhoto = false;
   UserSubscriptionState get _userState => widget.userState;
 
   String _formatDate(DateTime date) =>
       '${date.year}-${date.month.toString().padLeft(2, '0')}-${date.day.toString().padLeft(2, '0')}';
+
+  Future<void> _editNickname() async {
+    final controller = TextEditingController(text: _userState.nickname);
+    final next = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text('profile.nickname_title'.tr()),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          maxLength: 20,
+          decoration: InputDecoration(
+            hintText: 'profile.nickname_hint'.tr(),
+            counterText: '',
+          ),
+          onSubmitted: (value) => Navigator.pop(dialogContext, value.trim()),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(dialogContext), child: Text('common.cancel'.tr())),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, controller.text.trim()),
+            child: Text('common.save'.tr()),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (next == null || next.isEmpty || !mounted) return;
+    final uid = _userState.uid;
+    if (uid == null || uid.isEmpty || _userState.isGuest) {
+      _userState.setNickname(next);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('profile.nickname_updated'.tr())),
+      );
+      return;
+    }
+    final ok = await _database.updateUserNickname(uid: uid, nickname: next);
+    if (!mounted) return;
+    if (ok) {
+      _userState.setNickname(next);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('profile.nickname_saved'.tr())),
+      );
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('profile.nickname_failed'.tr())),
+      );
+    }
+  }
+
+  Future<void> _pickProfilePhoto() async {
+    final uid = _userState.uid;
+    if (uid == null || uid.isEmpty || _userState.isGuest) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('profile.photo_login'.tr())),
+      );
+      return;
+    }
+    final picker = ImagePicker();
+    final picked = await picker.pickImage(
+      source: ImageSource.gallery,
+      maxWidth: 256,
+      maxHeight: 256,
+      imageQuality: 50,
+    );
+    if (picked == null || !mounted) return;
+    setState(() => _uploadingPhoto = true);
+    try {
+      final bytes = await picked.readAsBytes();
+      if (bytes.isEmpty) throw StateError('empty image');
+      final url = await StorageService.uploadAvatar(userId: uid, bytes: bytes);
+      if (url == null) throw StateError('upload failed');
+      await _auth.updatePhotoUrl(url);
+      final ok = await _database.updateUserPhotoUrl(uid: uid, photoUrl: url);
+      if (!mounted) return;
+      if (ok) {
+        _userState.setPhotoUrl(url);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('profile.photo_updated'.tr())),
+        );
+      } else {
+        throw StateError('profile write failed');
+      }
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('profile.photo_failed'.tr())),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _uploadingPhoto = false);
+    }
+  }
+
+  Future<void> _openLanguageDialog() async {
+    final current = context.locale;
+    final selected = await showDialog<Locale>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text('settings.language'.tr()),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: Icon(current.languageCode == 'ko' ? Icons.check_circle : Icons.circle_outlined, color: LoopiColors.purple),
+              title: Text('settings.korean'.tr()),
+              onTap: () => Navigator.pop(dialogContext, const Locale('ko')),
+            ),
+            ListTile(
+              leading: Icon(current.languageCode == 'en' ? Icons.check_circle : Icons.circle_outlined, color: LoopiColors.purple),
+              title: Text('settings.english'.tr()),
+              onTap: () => Navigator.pop(dialogContext, const Locale('en')),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(dialogContext), child: Text('common.cancel'.tr())),
+        ],
+      ),
+    );
+    if (selected == null || !mounted || selected == current) return;
+    await context.setLocale(selected);
+  }
+
+  Future<void> _openOwnFeed() async {
+    final uid = _userState.uid;
+    if (uid == null || uid.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('profile.feed_login'.tr())),
+      );
+      return;
+    }
+    if (widget.onOpenUserFeed != null) {
+      widget.onOpenUserFeed!(uid, _userState.nickname);
+      return;
+    }
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => UserProfileScreen(
+          authorId: uid,
+          authorName: _userState.nickname,
+          library: widget.library,
+          userState: widget.userState,
+        ),
+      ),
+    );
+  }
 
   Future<void> _openSubscriptionDialog() async {
     await showDialog<void>(
@@ -30,31 +195,31 @@ class _MyProfileScreenState extends State<MyProfileScreen> {
         builder: (context, _) {
           final isPro = _userState.isPro;
           return AlertDialog(
-            title: const Text('나의 구독'),
+            title: Text('profile.my_subscription'.tr()),
             content: Column(
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: isPro
                   ? [
-                      const Text('루피 Pro 이용 중', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 16)),
+                      Text('profile.plan_pro'.tr(), style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 16)),
                       const SizedBox(height: 12),
-                      _infoRow('다음 결제일', _userState.nextBillingDate != null ? _formatDate(_userState.nextBillingDate!) : '-'),
+                      _infoRow('profile.next_billing'.tr(), _userState.nextBillingDate != null ? _formatDate(_userState.nextBillingDate!) : '-'),
                       const SizedBox(height: 6),
-                      _infoRow('결제 수단', _userState.paymentMethod),
+                      _infoRow('profile.payment_method'.tr(), _userState.paymentMethod),
                     ]
                   : [
-                      const Text('현재 Free 플랜 이용 중', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 15)),
+                      Text('profile.plan_free'.tr(), style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 15)),
                       const SizedBox(height: 8),
-                      Text('Pro로 업그레이드하고 무제한 기능을 사용해보세요.', style: TextStyle(color: LoopiColors.muted)),
+                      Text('profile.upgrade_hint'.tr(), style: TextStyle(color: LoopiColors.muted)),
                     ],
             ),
             actions: [
-              TextButton(onPressed: () => Navigator.pop(dialogContext), child: const Text('닫기')),
+              TextButton(onPressed: () => Navigator.pop(dialogContext), child: Text('common.close'.tr())),
               if (isPro)
                 TextButton(
                   onPressed: () => _confirmCancelSubscription(dialogContext),
                   style: TextButton.styleFrom(foregroundColor: Colors.redAccent),
-                  child: const Text('구독 해제'),
+                  child: Text('profile.cancel_subscription'.tr()),
                 )
               else
                 FilledButton(
@@ -65,7 +230,7 @@ class _MyProfileScreenState extends State<MyProfileScreen> {
                     );
                   },
                   style: FilledButton.styleFrom(backgroundColor: LoopiColors.deepPurple),
-                  child: const Text('Pro 플랜 업그레이드'),
+                  child: Text('profile.upgrade'.tr()),
                 ),
             ],
           );
@@ -78,14 +243,14 @@ class _MyProfileScreenState extends State<MyProfileScreen> {
     final confirmed = await showDialog<bool>(
       context: dialogContext,
       builder: (confirmContext) => AlertDialog(
-        title: const Text('구독을 해제할까요?'),
-        content: const Text('구독을 해제하면 다음 결제일부터 Free 플랜으로 전환됩니다.'),
+        title: Text('profile.cancel_subscription_title'.tr()),
+        content: Text('profile.cancel_subscription_body'.tr()),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(confirmContext, false), child: const Text('아니오')),
+          TextButton(onPressed: () => Navigator.pop(confirmContext, false), child: Text('common.no'.tr())),
           TextButton(
             onPressed: () => Navigator.pop(confirmContext, true),
             style: TextButton.styleFrom(foregroundColor: Colors.redAccent),
-            child: const Text('구독 해제'),
+            child: Text('profile.cancel_subscription'.tr()),
           ),
         ],
       ),
@@ -102,34 +267,34 @@ class _MyProfileScreenState extends State<MyProfileScreen> {
     await showDialog<void>(
       context: context,
       builder: (dialogContext) => AlertDialog(
-        title: const Text('1:1 문의'),
+        title: Text('profile.contact'.tr()),
         content: SingleChildScrollView(
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
               TextField(
                 controller: subjectController,
-                decoration: const InputDecoration(labelText: '제목'),
+                decoration: InputDecoration(labelText: 'profile.contact_subject'.tr()),
               ),
               const SizedBox(height: 12),
               TextField(
                 controller: messageController,
                 maxLines: 4,
-                decoration: const InputDecoration(labelText: '문의 내용', alignLabelWithHint: true),
+                decoration: InputDecoration(labelText: 'profile.contact_message'.tr(), alignLabelWithHint: true),
               ),
             ],
           ),
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(dialogContext), child: const Text('취소')),
+          TextButton(onPressed: () => Navigator.pop(dialogContext), child: Text('common.cancel'.tr())),
           FilledButton(
             onPressed: () {
               Navigator.pop(dialogContext);
               ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text('문의가 접수되었습니다. 빠르게 답변드릴게요!')),
+                SnackBar(content: Text('profile.contact_sent'.tr())),
               );
             },
-            child: const Text('문의 보내기'),
+            child: Text('profile.contact_send'.tr()),
           ),
         ],
       ),
@@ -142,16 +307,23 @@ class _MyProfileScreenState extends State<MyProfileScreen> {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (dialogContext) => AlertDialog(
-        title: const Text('로그아웃 하시겠어요?'),
+        title: Text('profile.logout_confirm'.tr()),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(dialogContext, false), child: const Text('취소')),
-          FilledButton(onPressed: () => Navigator.pop(dialogContext, true), child: const Text('로그아웃')),
+          TextButton(onPressed: () => Navigator.pop(dialogContext, false), child: Text('common.cancel'.tr())),
+          FilledButton(onPressed: () => Navigator.pop(dialogContext, true), child: Text('profile.logout'.tr())),
         ],
       ),
     );
     if (confirmed == true && mounted) {
+      if (widget.onSignedOut != null) {
+        Navigator.of(context).popUntil((route) => route.isFirst);
+        await widget.onSignedOut!();
+        return;
+      }
       Navigator.of(context).pushAndRemoveUntil(
-        MaterialPageRoute<void>(builder: (_) => SocialLoginScreen(library: widget.library)),
+        MaterialPageRoute<void>(
+          builder: (_) => SocialLoginScreen(library: widget.library, userState: widget.userState),
+        ),
         (route) => false,
       );
     }
@@ -161,20 +333,20 @@ class _MyProfileScreenState extends State<MyProfileScreen> {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (dialogContext) => AlertDialog(
-        title: const Text('정말 탈퇴하시겠어요?'),
-        content: const Text('탈퇴 시 저장된 루틴과 연습 기록이 모두 삭제되며 복구할 수 없습니다.'),
+        title: Text('profile.delete_account_title'.tr()),
+        content: Text('profile.delete_account_body'.tr()),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(dialogContext, false), child: const Text('취소')),
+          TextButton(onPressed: () => Navigator.pop(dialogContext, false), child: Text('common.cancel'.tr())),
           TextButton(
             onPressed: () => Navigator.pop(dialogContext, true),
             style: TextButton.styleFrom(foregroundColor: Colors.redAccent),
-            child: const Text('탈퇴하기'),
+            child: Text('profile.delete_account_action'.tr()),
           ),
         ],
       ),
     );
     if (confirmed == true && mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('회원 탈퇴가 접수되었습니다.')));
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('profile.delete_account_done'.tr())));
     }
   }
 
@@ -195,9 +367,9 @@ class _MyProfileScreenState extends State<MyProfileScreen> {
       builder: (context, _) {
         final isPro = _userState.isPro;
         return Scaffold(
-          backgroundColor: LoopiColors.canvas,
+          backgroundColor: LoopiColors.pageBackground(context),
           appBar: AppBar(
-            title: const Text('내 정보'),
+            title: Text('profile.title'.tr()),
             leading: IconButton(
               icon: const Icon(Icons.arrow_back),
               onPressed: () {
@@ -210,20 +382,31 @@ class _MyProfileScreenState extends State<MyProfileScreen> {
             children: [
               _profileCard(isPro),
               const SizedBox(height: 24),
-              _sectionLabel('계정 & 구독'),
+              _sectionLabel('profile.section_account'.tr()),
               Card(
                 child: Column(
                   children: [
                     ListTile(
                       leading: const Text('👤', style: TextStyle(fontSize: 20)),
-                      title: const Text('로그인 정보'),
-                      subtitle: Text('${_userState.email} · ${_userState.socialProvider} 연동됨'),
+                      title: Text('profile.login_info'.tr()),
+                      subtitle: Text('profile.login_linked'.tr(namedArgs: {
+                        'email': _userState.email,
+                        'provider': _userState.socialProvider,
+                      })),
+                    ),
+                    const Divider(height: 1),
+                    ListTile(
+                      leading: const Icon(Icons.grid_view_rounded, color: LoopiColors.purple),
+                      title: Text('profile.my_feed'.tr()),
+                      subtitle: Text('profile.my_feed_subtitle'.tr()),
+                      trailing: const Icon(Icons.chevron_right),
+                      onTap: _openOwnFeed,
                     ),
                     const Divider(height: 1),
                     ListTile(
                       leading: const Text('💳', style: TextStyle(fontSize: 20)),
-                      title: const Text('나의 구독'),
-                      subtitle: Text(isPro ? 'Pro 이용 중' : 'Free 플랜 이용 중'),
+                      title: Text('profile.my_subscription'.tr()),
+                      subtitle: Text(isPro ? 'profile.plan_pro_short'.tr() : 'profile.plan_free_short'.tr()),
                       trailing: const Icon(Icons.chevron_right),
                       onTap: _openSubscriptionDialog,
                     ),
@@ -231,33 +414,49 @@ class _MyProfileScreenState extends State<MyProfileScreen> {
                 ),
               ),
               const SizedBox(height: 24),
-              _sectionLabel('고객 지원'),
+              _sectionLabel('settings.title'.tr()),
+              Card(
+                child: ListTile(
+                  leading: const Icon(Icons.language, color: LoopiColors.purple),
+                  title: Text('settings.language'.tr()),
+                  subtitle: Text(
+                    '${'settings.language_subtitle'.tr()} · ${context.locale.languageCode == 'ko' ? 'settings.korean'.tr() : 'settings.english'.tr()}',
+                  ),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: _openLanguageDialog,
+                ),
+              ),
+              const SizedBox(height: 24),
+              _sectionLabel('profile.section_faqs'.tr()),
               Card(
                 child: Column(
                   children: [
-                    _faqTile('영상 백업은 어떻게 되나요?', 'Pro 플랜은 녹화 영상을 클라우드에 자동 백업해 기기 간 동기화됩니다. Free 플랜은 기기 내부에만 저장돼요.'),
+                    _faqTile('profile.faq_backup_q'.tr(), 'profile.faq_backup_a'.tr()),
                     const Divider(height: 1),
-                    _faqTile('구독 취소 시 기존 영상은 유지되나요?', '네, 이미 저장된 영상과 루틴은 삭제되지 않습니다. 다만 Pro 전용 기능은 다음 결제일부터 이용할 수 없어요.'),
+                    _faqTile('profile.faq_cancel_q'.tr(), 'profile.faq_cancel_a'.tr()),
                     const Divider(height: 1),
-                    _faqTile('오프라인에서도 연습 가능한가요?', '이미 기기에 저장된 루틴과 영상은 오프라인 상태에서도 연습 모드로 재생할 수 있습니다.'),
-                    const Divider(height: 1),
-                    ListTile(
-                      leading: const Text('✉️', style: TextStyle(fontSize: 20)),
-                      title: const Text('1:1 문의'),
-                      trailing: const Icon(Icons.chevron_right),
-                      onTap: _openContactDialog,
-                    ),
+                    _faqTile('profile.faq_offline_q'.tr(), 'profile.faq_offline_a'.tr()),
                   ],
+                ),
+              ),
+              const SizedBox(height: 24),
+              _sectionLabel('profile.section_support'.tr()),
+              Card(
+                child: ListTile(
+                  leading: const Text('✉️', style: TextStyle(fontSize: 20)),
+                  title: Text('profile.contact'.tr()),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: _openContactDialog,
                 ),
               ),
               const SizedBox(height: 32),
               Center(
                 child: Column(
                   children: [
-                    TextButton(onPressed: _confirmLogout, child: Text('로그아웃', style: TextStyle(color: LoopiColors.muted))),
+                    TextButton(onPressed: _confirmLogout, child: Text('profile.logout'.tr(), style: TextStyle(color: LoopiColors.muted))),
                     TextButton(
                       onPressed: _confirmWithdraw,
-                      child: const Text('회원탈퇴', style: TextStyle(color: Colors.redAccent)),
+                      child: Text('profile.delete_account'.tr(), style: const TextStyle(color: Colors.redAccent)),
                     ),
                   ],
                 ),
@@ -292,16 +491,47 @@ class _MyProfileScreenState extends State<MyProfileScreen> {
     return Container(
       padding: const EdgeInsets.all(20),
       decoration: BoxDecoration(
-        color: Colors.white,
+        color: LoopiColors.card(context),
         borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: LoopiColors.line),
+        border: Border.all(color: LoopiColors.divider(context)),
       ),
       child: Row(
         children: [
-          CircleAvatar(
-            radius: 32,
-            backgroundColor: LoopiColors.purple.withValues(alpha: 0.15),
-            child: Icon(Icons.person, size: 36, color: LoopiColors.purple),
+          Tooltip(
+            message: 'profile.photo_upload'.tr(),
+            child: GestureDetector(
+            onTap: _uploadingPhoto ? null : _pickProfilePhoto,
+            child: Stack(
+              alignment: Alignment.bottomRight,
+              children: [
+                CircleAvatar(
+                  radius: 32,
+                  backgroundColor: LoopiColors.purple.withValues(alpha: 0.15),
+                  child: _uploadingPhoto
+                      ? const SizedBox(
+                          width: 22,
+                          height: 22,
+                          child: CircularProgressIndicator(strokeWidth: 2.2, color: LoopiColors.purple),
+                        )
+                      : ClipOval(
+                          child: _userState.photoUrl == null || _userState.photoUrl!.isEmpty
+                              ? const Icon(Icons.person, size: 36, color: LoopiColors.purple)
+                              : CachedRemoteImage(
+                                  url: _userState.photoUrl!,
+                                  width: 64,
+                                  height: 64,
+                                  memCacheWidth: 128,
+                                ),
+                        ),
+                ),
+                Container(
+                  padding: const EdgeInsets.all(3),
+                  decoration: const BoxDecoration(color: LoopiColors.deepPurple, shape: BoxShape.circle),
+                  child: const Icon(Icons.photo_camera, size: 12, color: Colors.white),
+                ),
+              ],
+            ),
+            ),
           ),
           const SizedBox(width: 16),
           Expanded(
@@ -309,10 +539,20 @@ class _MyProfileScreenState extends State<MyProfileScreen> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(_userState.nickname, style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 18)),
+                const SizedBox(height: 4),
+                Text(
+                  'profile.nickname_display'.tr(namedArgs: {'name': _userState.nickname}),
+                  style: TextStyle(color: LoopiColors.muted, fontSize: 12),
+                ),
                 const SizedBox(height: 6),
                 _PlanBadge(isPro: isPro),
               ],
             ),
+          ),
+          IconButton(
+            tooltip: 'profile.nickname_edit'.tr(),
+            onPressed: _editNickname,
+            icon: const Icon(Icons.edit_outlined),
           ),
         ],
       ),

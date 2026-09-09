@@ -2,6 +2,12 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Voice shadowing practice records your speech along with the routine audio.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Video practice records your performance with the camera.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>LOOPI uses your photo library so you can set a profile picture.</string>
 	<key>CADisableMinimumFrameDurationOnPhone</key>
 	<true/>
 	<key>CFBundleDevelopmentRegion</key>

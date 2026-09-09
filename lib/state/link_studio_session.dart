@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../models/routine_category.dart';
 import '../models/routine_models.dart';
 import '../utils/time_format.dart';
 
@@ -162,6 +163,16 @@ class LinkStudioSession extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Marks [index] as the routine chorus. Only one interval can be highlighted.
+  void toggleHighlight(int index) {
+    if (index < 0 || index >= _segments.length) return;
+    final turningOn = !_segments[index].isHighlight;
+    for (var i = 0; i < _segments.length; i++) {
+      _segments[i] = _segments[i].copyWith(isHighlight: turningOn && i == index);
+    }
+    notifyListeners();
+  }
+
   void beginTest({int startIndex = 0}) {
     isTesting = true;
     testSegmentIndex = startIndex.clamp(0, _segments.length - 1);
@@ -200,9 +211,16 @@ class LinkStudioSession extends ChangeNotifier {
     required String name,
     required String videoUrl,
     required String videoId,
+    String? id,
+    DateTime? createdAt,
+    bool isFavorite = false,
+    String authorId = 'me',
+    String authorName = '나',
+    String category = RoutineCategory.dance,
+    bool isMirrored = false,
   }) {
     return SavedRoutine(
-      id: 'rtn_${DateTime.now().microsecondsSinceEpoch}',
+      id: id ?? 'rtn_${DateTime.now().microsecondsSinceEpoch}',
       name: name,
       videoUrl: videoUrl,
       videoId: videoId,
@@ -215,15 +233,59 @@ class LinkStudioSession extends ChangeNotifier {
             speed: s.speed,
             loopCount: s.loopCount,
             delaySec: s.delaySec,
+            isHighlight: s.isHighlight,
           ),
         ),
       ),
-      createdAt: DateTime.now(),
+      createdAt: createdAt ?? DateTime.now(),
       sourceType: _sourceType,
       localFilePath: _localFilePath,
       fileName: _fileName,
       localDataBytes: _localDataBytes,
+      isFavorite: isFavorite,
+      authorId: authorId,
+      authorName: authorName,
+      category: category,
+      isMirrored: isMirrored,
     );
+  }
+
+  void loadFromRoutine(SavedRoutine routine) {
+    _segments
+      ..clear()
+      ..addAll(
+        routine.segments.map(
+          (s) => RoutineSegment(
+            id: s.id,
+            startSec: s.startSec,
+            endSec: s.endSec,
+            speed: s.speed,
+            loopCount: s.loopCount,
+            delaySec: s.delaySec,
+            isHighlight: s.isHighlight,
+          ),
+        ),
+      );
+    if (_segments.isEmpty) {
+      _segments.add(
+        RoutineSegment(
+          id: 'seg_0',
+          startSec: 0,
+          endSec: _defaultEnd(_videoDuration),
+        ),
+      );
+    }
+    _selectedIndex = 0;
+    _idSeed = _segments.length + 1;
+    _sourceType = routine.sourceType;
+    _localFilePath = routine.localFilePath;
+    _fileName = routine.fileName;
+    _localDataBytes = routine.localDataBytes;
+    final maxEnd = _segments.map((s) => s.endSec).fold<double>(0, (a, b) => a > b ? a : b);
+    if (maxEnd > _videoDuration) {
+      _videoDuration = maxEnd;
+    }
+    notifyListeners();
   }
 
   RoutineSegment _clampSegment(RoutineSegment segment) {

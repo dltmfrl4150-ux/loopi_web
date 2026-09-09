@@ -3,17 +3,28 @@ import 'package:easy_localization/easy_localization.dart';
 import 'package:file_picker/file_picker.dart';
 
 import '../models/routine_models.dart';
+import '../models/routine_category.dart';
+import '../models/community_models.dart';
+import '../services/database_service.dart';
 import '../state/routine_library.dart';
 import '../state/user_state.dart';
 import '../theme/loopi_colors.dart';
+import '../utils/media_limits.dart';
 import '../utils/time_format.dart';
+import '../utils/youtube_id.dart';
 import '../widgets/app_logo.dart';
+import '../widgets/cached_remote_image.dart';
 import '../widgets/favorite_icon_button.dart';
+import '../widgets/category_filter_chips.dart';
+import '../widgets/highlight_interval.dart';
+import '../widgets/shell_close_scope.dart';
+import 'community_screen.dart';
 import 'link_studio_screen.dart';
 import 'my_profile_screen.dart';
 import 'practice_mode_screen.dart';
 import 'practice_screen.dart';
 import 'routine_player_screen.dart';
+import 'user_profile_screen.dart';
 
 enum SelectionMode { none, group, delete }
 
@@ -43,16 +54,22 @@ class CommunityFeedStore extends ChangeNotifier {
     await library.setFavorite(routine.id, value);
     if (!context.mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(value ? '즐겨찾기에 추가했습니다.' : '즐겨찾기에서 삭제했습니다.')),
+      SnackBar(content: Text(value ? 'common.favorite_added'.tr() : 'common.favorite_removed'.tr())),
     );
   }
 }
 
 class HomeDashboardScreen extends StatefulWidget {
-  const HomeDashboardScreen({super.key, required this.library, required this.userState});
+  const HomeDashboardScreen({
+    super.key,
+    required this.library,
+    required this.userState,
+    this.onSignedOut,
+  });
 
   final RoutineLibrary library;
   final UserSubscriptionState userState;
+  final Future<void> Function()? onSignedOut;
 
   @override
   State<HomeDashboardScreen> createState() => _HomeDashboardScreenState();
@@ -60,64 +77,128 @@ class HomeDashboardScreen extends StatefulWidget {
 
 class _HomeDashboardScreenState extends State<HomeDashboardScreen> {
   int _tabIndex = 0;
-  SavedRoutine? _selectedPracticeRoutine;
-    Widget? _selectedPracticeView;
+  Widget? _shellPage;
   final CommunityFeedStore _communityFeed = CommunityFeedStore();
+  final DatabaseService _database = DatabaseService();
+  final ValueNotifier<int> _communityRefreshTick = ValueNotifier<int>(0);
+
+  @override
+  void dispose() {
+    _communityRefreshTick.dispose();
+    super.dispose();
+  }
+
+  void _bumpCommunityRefresh() {
+    _communityRefreshTick.value++;
+  }
 
   Future<void> _shareRoutine(SavedRoutine routine) async {
     final controller = TextEditingController();
     final description = await showDialog<String>(
       context: context,
       builder: (dialogContext) => AlertDialog(
-        title: Text('커뮤니티에 ${routine.name} 공유'),
+        title: Text('library.share_routine_title'.tr(namedArgs: {'name': routine.name})),
         content: TextField(
           controller: controller,
           maxLength: 50,
           maxLines: 3,
-          decoration: const InputDecoration(
-            hintText: '루틴을 소개해 주세요',
+          decoration: InputDecoration(
+            hintText: 'library.share_routine_hint'.tr(),
             counterText: null,
           ),
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(dialogContext), child: const Text('취소')),
-          FilledButton(onPressed: () => Navigator.pop(dialogContext, controller.text.trim()), child: const Text('커뮤니티에 게시')),
+          TextButton(onPressed: () => Navigator.pop(dialogContext), child: Text('common.cancel'.tr())),
+          FilledButton(onPressed: () => Navigator.pop(dialogContext, controller.text.trim()), child: Text('library.share_routine_action'.tr())),
         ],
       ),
     );
     controller.dispose();
     if (description == null) return;
+    final authorId = widget.userState.uid ?? 'guest';
+    final authorName = widget.userState.nickname;
+    await _database.shareRoutineToCommunity(
+      routine: routine,
+      description: description,
+      authorId: authorId,
+      authorName: authorName,
+      authorPhotoUrl: widget.userState.photoUrl,
+    );
     _communityFeed.add(CommunityPost(routine: routine, description: description));
+    _bumpCommunityRefresh();
     if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('커뮤니티에 게시했습니다.')));
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('library.share_routine_success'.tr())));
     }
   }
 
-  Future<void> _pickRoutineToShare() async {
-    final routines = widget.library.routines;
-    if (routines.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('공유할 루틴이 없습니다.')));
-      return;
-    }
-    final routine = await showDialog<SavedRoutine>(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: const Text('공유할 루틴 선택'),
-        content: SizedBox(
-          width: 420,
-          child: ListView.builder(
-            shrinkWrap: true,
-            itemCount: routines.length,
-            itemBuilder: (_, index) => ListTile(
-              leading: const Icon(Icons.play_circle_outline),
-              title: Text(routines[index].name),
-              onTap: () => Navigator.pop(dialogContext, routines[index]),
-            ),
-          ),
-        ),
-      ),
+  Future<void> _sharePracticeResult(PracticeResult result) async {
+    var category = RoutineCategory.normalize(
+      widget.library.byId(result.routineId)?.category ?? result.category,
     );
-    if (routine != null) await _shareRoutine(routine);
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) {
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            return AlertDialog(
+              title: Text('library.share_practice_title'.tr()),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('library.share_practice_message'.tr(namedArgs: {'name': result.name})),
+                  const SizedBox(height: 16),
+                  Text(
+                    'category.label'.tr(),
+                    style: const TextStyle(fontWeight: FontWeight.w700),
+                  ),
+                  const SizedBox(height: 8),
+                  CategoryChoiceChips(
+                    selected: category,
+                    onSelected: (value) => setDialogState(() => category = value),
+                  ),
+                ],
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(dialogContext, false),
+                  child: Text('common.cancel'.tr()),
+                ),
+                FilledButton(
+                  onPressed: () => Navigator.pop(dialogContext, true),
+                  child: Text('common.share'.tr()),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+    if (confirmed != true) return;
+    try {
+      await _database.sharePracticeToShowcase(
+        result: result,
+        authorId: widget.userState.uid ?? 'guest',
+        authorName: widget.userState.nickname,
+        authorPhotoUrl: widget.userState.photoUrl,
+        mediaKind: result.isAudioRecording
+            ? ShowcaseMediaKind.audio
+            : inferMediaKindFromPath(result.recordedPath),
+        category: category,
+        routine: widget.library.byId(result.routineId),
+      );
+      _bumpCommunityRefresh();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('library.share_practice_success'.tr())),
+      );
+    } catch (error) {
+      debugPrint('[LOOPI] share practice to Showcase failed: $error');
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('쇼케이스 업로드에 실패했습니다. 다시 시도해 주세요.')),
+      );
+    }
   }
 
   void _openLinkStudio({
@@ -130,6 +211,21 @@ class _HomeDashboardScreenState extends State<HomeDashboardScreen> {
           library: widget.library,
           sourceType: sourceType,
           file: file,
+        ),
+      ),
+    );
+  }
+
+  void _openEditRoutine(SavedRoutine routine) {
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => LinkStudioScreen(
+          library: widget.library,
+          editingRoutine: routine,
+          initialVideoUrl: routine.videoUrl.isNotEmpty ? routine.videoUrl : kDefaultVideoUrl,
+          sourceType: routine.sourceType,
+          localFilePath: routine.localFilePath,
+          fileName: routine.fileName,
         ),
       ),
     );
@@ -161,11 +257,41 @@ class _HomeDashboardScreenState extends State<HomeDashboardScreen> {
   }
 
   void _startRoutine(SavedRoutine routine) {
+    _openPracticeView(
+      PracticeScreen(
+        library: widget.library,
+        selectedRoutine: routine,
+        onOpenInShell: _openInShell,
+        profilePhotoUrl: widget.userState.photoUrl,
+      ),
+    );
+  }
+
+  void _openUserFeed(String authorId, String authorName) {
+    if (authorId.isEmpty) return;
+    _openInShell(
+      UserProfileScreen(
+        authorId: authorId,
+        authorName: authorName,
+        library: widget.library,
+        userState: widget.userState,
+        onClose: _closeShell,
+      ),
+    );
+  }
+
+  void _openInShell(Widget page) {
+    if (Navigator.of(context).canPop()) {
+      Navigator.of(context).popUntil((route) => route.isFirst);
+    }
     setState(() {
-      _selectedPracticeRoutine = routine;
-      _selectedPracticeView = null;
-      _tabIndex = 3;
+      _shellPage = ShellCloseScope(close: _closeShell, child: page);
     });
+  }
+
+  void _closeShell() {
+    if (_shellPage == null) return;
+    setState(() => _shellPage = null);
   }
 
   void _openRoutinePlayer(SavedRoutine routine) {
@@ -174,23 +300,28 @@ class _HomeDashboardScreenState extends State<HomeDashboardScreen> {
         builder: (_) => RoutinePlayerScreen(
           routine: routine,
           library: widget.library,
+          onOpenInShell: _openInShell,
         ),
       ),
     );
   }
 
   void _openLibraryTab() {
-    setState(() => _tabIndex = 4);
+    setState(() {
+      _shellPage = null;
+      _tabIndex = 3;
+    });
   }
 
   void _openPracticeView(Widget view) {
-    // Push as a real route (rather than swapping the embedded IndexedStack
-    // tab) so the view's back button can safely pop back to this screen.
-    Navigator.of(context).push(MaterialPageRoute<void>(builder: (_) => view));
+    _openInShell(view);
   }
 
   void _onTabSelected(int index) {
-    setState(() => _tabIndex = index);
+    setState(() {
+      _shellPage = null;
+      _tabIndex = index;
+    });
   }
 
   @override
@@ -198,7 +329,9 @@ class _HomeDashboardScreenState extends State<HomeDashboardScreen> {
     final scheme = Theme.of(context).colorScheme;
 
     return Scaffold(
-      appBar: AppBar(
+      appBar: _shellPage != null
+          ? null
+          : AppBar(
         elevation: 0,
         backgroundColor: Colors.transparent,
         titleSpacing: 16,
@@ -209,30 +342,33 @@ class _HomeDashboardScreenState extends State<HomeDashboardScreen> {
         actions: [
           IconButton(
             onPressed: () {},
-            tooltip: '알림',
+            tooltip: 'home.tooltip_notifications'.tr(),
             icon: const Icon(Icons.notifications_none_rounded),
           ),
           IconButton(
             onPressed: () => Navigator.of(context).push(
               MaterialPageRoute<void>(
-                builder: (_) => MyProfileScreen(userState: widget.userState, library: widget.library),
+                builder: (_) => MyProfileScreen(
+                  userState: widget.userState,
+                  library: widget.library,
+                  onSignedOut: widget.onSignedOut,
+                  onOpenUserFeed: (authorId, authorName) {
+                    Navigator.of(context).pop();
+                    _openUserFeed(authorId, authorName);
+                  },
+                ),
               ),
             ),
-            tooltip: '프로필',
+            tooltip: 'home.tooltip_profile'.tr(),
             icon: const Icon(Icons.account_circle_outlined),
           ),
-          if (_tabIndex == 4)
-            IconButton(
-              onPressed: _pickRoutineToShare,
-              tooltip: '커뮤니티에 루틴 올리기',
-              icon: const Icon(Icons.cloud_upload_outlined),
-            ),
           const SizedBox(width: 4),
         ],
       ),
       body: SafeArea(
         top: false,
-        child: IndexedStack(
+        child: _shellPage ??
+            IndexedStack(
           index: _tabIndex,
           children: [
             _HomeTab(
@@ -244,21 +380,24 @@ class _HomeDashboardScreenState extends State<HomeDashboardScreen> {
               onOpenRoutinePlayer: _openRoutinePlayer,
               onViewAll: _openLibraryTab,
             ),
-            LinkStudioScreen(library: widget.library, embedded: true),
-            CommunityFeedScreen(
-              feed: _communityFeed,
+            LinkStudioScreen(
               library: widget.library,
-              onPlay: _startRoutine,
+              embedded: true,
+              active: _tabIndex == 1,
             ),
-            PracticeScreen(
+            CommunityScreen(
               library: widget.library,
-              selectedRoutine: _selectedPracticeRoutine,
-              selectedView: _selectedPracticeView,
+              userState: widget.userState,
+              onPlayRoutine: _openRoutinePlayer,
+              refreshTick: _communityRefreshTick,
+              onOpenUserFeed: _openUserFeed,
             ),
             _LibraryTab(
               library: widget.library,
               onStartRoutine: _startRoutine,
               onShareRoutine: _shareRoutine,
+              onSharePracticeResult: _sharePracticeResult,
+              onEditRoutine: _openEditRoutine,
               onFavorite: (routine, value) => _communityFeed.toggleFavorite(routine, value, widget.library, context),
               onOpenPracticeView: _openPracticeView,
               onOpenRoutinePlayer: _openRoutinePlayer,
@@ -285,11 +424,6 @@ class _HomeDashboardScreenState extends State<HomeDashboardScreen> {
           icon: Icon(Icons.people_outline),
           selectedIcon: Icon(Icons.people),
           label: 'home.tab_community'.tr(),
-        ),
-        NavigationDestination(
-          icon: Icon(Icons.fitness_center_outlined),
-          selectedIcon: Icon(Icons.fitness_center),
-          label: '연습',
         ),
         NavigationDestination(
           icon: Icon(Icons.bookmark_outline),
@@ -391,6 +525,7 @@ class _HomeTab extends StatelessWidget {
                       routine: routine,
                       library: library,
                       onStart: () => onOpenRoutinePlayer(routine),
+                      onPractice: () => onStartRoutine(routine),
                     ),
                   ),
               ],
@@ -507,10 +642,9 @@ class _MediaSourceCards extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return IntrinsicHeight(
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
         Expanded(
           child: _MediaSourceCard(
             icon: Icons.play_circle_rounded,
@@ -540,8 +674,7 @@ class _MediaSourceCards extends StatelessWidget {
             onTap: onAudioTap,
           ),
         ),
-        ],
-      ),
+      ],
     );
   }
 }
@@ -566,40 +699,55 @@ class _MediaSourceCard extends StatelessWidget {
     return InkWell(
       onTap: onTap,
       borderRadius: BorderRadius.circular(16),
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(minHeight: 120),
-        child: Ink(
-          padding: const EdgeInsets.all(16),
-          decoration: BoxDecoration(
-            color: color,
-            borderRadius: BorderRadius.circular(16),
-          ),
-          child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(icon, color: Colors.white, size: 32),
-            const SizedBox(height: 8),
-            Text(
-              title,
-              style: TextStyle(
-                color: Colors.white,
-                fontSize: 14,
-                fontWeight: FontWeight.w800,
+      child: Ink(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+        decoration: BoxDecoration(
+          color: color,
+          borderRadius: BorderRadius.circular(16),
+        ),
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final content = Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(icon, color: Colors.white, size: 28),
+                const SizedBox(height: 6),
+                Text(
+                  title,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w800,
+                    height: 1.2,
+                  ),
+                  textAlign: TextAlign.center,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  subtitle,
+                  style: const TextStyle(
+                    color: Color(0xFFE8E0FF),
+                    fontSize: 11,
+                    height: 1.2,
+                  ),
+                  textAlign: TextAlign.center,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ],
+            );
+            if (!constraints.maxHeight.isFinite) return content;
+            return FittedBox(
+              fit: BoxFit.scaleDown,
+              alignment: Alignment.center,
+              child: SizedBox(
+                width: constraints.maxWidth,
+                child: content,
               ),
-              textAlign: TextAlign.center,
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-            ),
-            const SizedBox(height: 4),
-            Text(
-              subtitle,
-              style: TextStyle(color: Color(0xFFE8E0FF), fontSize: 11),
-              textAlign: TextAlign.center,
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-            ),
-          ],
-          ),
+            );
+          },
         ),
       ),
     );
@@ -648,8 +796,10 @@ class _RoutineCard extends StatelessWidget {
     required this.library,
     this.isSelected = false,
     this.onTap,
+    this.onPractice,
     this.onShare,
     this.onFavorite,
+    this.onEdit,
   });
 
   final SavedRoutine routine;
@@ -657,8 +807,10 @@ class _RoutineCard extends StatelessWidget {
   final RoutineLibrary library;
   final bool isSelected;
   final VoidCallback? onTap;
+  final VoidCallback? onPractice;
   final VoidCallback? onShare;
   final ValueChanged<bool>? onFavorite;
+  final VoidCallback? onEdit;
 
   @override
   Widget build(BuildContext context) {
@@ -666,7 +818,7 @@ class _RoutineCard extends StatelessWidget {
     final first = routine.segments.first;
     final last = routine.segments.last;
     final rangeLabel =
-        '${formatMmSs(first.startSec)} – ${formatMmSs(last.endSec)} · ${routine.segments.length}개 구간';
+        '${formatMmSs(first.startSec)} – ${formatMmSs(last.endSec)} · ${'common.interval_count'.tr(namedArgs: {'count': '${routine.segments.length}'})}';
 
     return InkWell(
       onTap: onTap,
@@ -689,19 +841,13 @@ class _RoutineCard extends StatelessWidget {
               ),
             ClipRRect(
               borderRadius: BorderRadius.circular(10),
-              child: routine.sourceType == SourceType.youtube
-                  ? Image.network(
-                      'https://img.youtube.com/vi/${routine.videoId}/mqdefault.jpg',
+              child: routine.sourceType == SourceType.youtube &&
+                      (youtubeThumbnailUrl(routine.videoId) ?? youtubeThumbnailUrl(routine.videoUrl)) != null
+                  ? CachedRemoteImage(
+                      url: youtubeThumbnailUrl(routine.videoId) ?? youtubeThumbnailUrl(routine.videoUrl)!,
                       width: 72,
                       height: 52,
-                      fit: BoxFit.cover,
-                      errorBuilder: (_, _, _) => Container(
-                        width: 72,
-                        height: 52,
-                        color: scheme.surfaceContainerHighest,
-                        alignment: Alignment.center,
-                        child: Icon(Icons.play_circle_fill_rounded, color: LoopiColors.purple),
-                      ),
+                      memCacheWidth: 160,
                     )
                   : Container(
                       width: 72,
@@ -732,14 +878,24 @@ class _RoutineCard extends StatelessWidget {
                     rangeLabel,
                     style: TextStyle(color: scheme.onSurfaceVariant, fontSize: 12),
                   ),
+                  if (routine.hasHighlight) ...[
+                    const SizedBox(height: 6),
+                    const ChorusContainsBadge(compact: true),
+                  ],
                 ],
               ),
             ),
             const SizedBox(width: 8),
+            if (onEdit != null)
+              IconButton(
+                onPressed: onEdit,
+                tooltip: 'library.tooltip_edit'.tr(),
+                icon: const Icon(Icons.edit_outlined),
+              ),
             if (onShare != null)
               IconButton(
                 onPressed: onShare,
-                tooltip: '커뮤니티에 공유',
+                tooltip: 'library.tooltip_share'.tr(),
                 icon: const Icon(Icons.share_outlined),
               ),
             if (onFavorite != null)
@@ -760,27 +916,18 @@ class _RoutineCard extends StatelessWidget {
                     ),
                     child: const Text('Play'),
                   ),
-                  const SizedBox(width: 4),
-                  OutlinedButton(
-                    onPressed: () {
-                      // Navigate to practice screen
-                      final parentContext = context;
-                      Navigator.of(parentContext).push(
-                        MaterialPageRoute<void>(
-                          builder: (_) => PracticeScreen(
-                            library: library,
-                            selectedRoutine: routine,
-                          ),
-                        ),
-                      );
-                    },
-                    style: OutlinedButton.styleFrom(
-                      foregroundColor: LoopiColors.purple,
-                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                      visualDensity: VisualDensity.compact,
+                  if (onPractice != null) ...[
+                    const SizedBox(width: 4),
+                    OutlinedButton(
+                      onPressed: onPractice,
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: LoopiColors.purple,
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                        visualDensity: VisualDensity.compact,
+                      ),
+                      child: const Text('Practice'),
                     ),
-                    child: const Text('Practice'),
-                  ),
+                  ],
                 ],
               ),
           ],
@@ -795,6 +942,8 @@ class _LibraryTab extends StatefulWidget {
     required this.library,
     required this.onStartRoutine,
     required this.onShareRoutine,
+    required this.onSharePracticeResult,
+    required this.onEditRoutine,
     required this.onFavorite,
     required this.onOpenPracticeView,
     required this.onOpenRoutinePlayer,
@@ -803,6 +952,8 @@ class _LibraryTab extends StatefulWidget {
   final RoutineLibrary library;
   final ValueChanged<SavedRoutine> onStartRoutine;
   final ValueChanged<SavedRoutine> onShareRoutine;
+  final ValueChanged<PracticeResult> onSharePracticeResult;
+  final ValueChanged<SavedRoutine> onEditRoutine;
   final void Function(SavedRoutine routine, bool value) onFavorite;
   final ValueChanged<Widget> onOpenPracticeView;
   final ValueChanged<SavedRoutine> onOpenRoutinePlayer;
@@ -811,10 +962,24 @@ class _LibraryTab extends StatefulWidget {
   State<_LibraryTab> createState() => _LibraryTabState();
 }
 
-class _LibraryTabState extends State<_LibraryTab> {
+class _LibraryTabState extends State<_LibraryTab> with SingleTickerProviderStateMixin {
   SelectionMode _selectionMode = SelectionMode.none;
   final Set<String> _selectedIds = {};
-  int _librarySection = 0;
+  late final TabController _libraryTabs;
+  String _category = RoutineCategory.all;
+  int _practiceVisibleCount = kFeedPageSize;
+
+  @override
+  void initState() {
+    super.initState();
+    _libraryTabs = TabController(length: 3, vsync: this);
+  }
+
+  @override
+  void dispose() {
+    _libraryTabs.dispose();
+    super.dispose();
+  }
 
   void _toggleSelection(String id) {
     setState(() {
@@ -841,14 +1006,7 @@ class _LibraryTabState extends State<_LibraryTab> {
   }
 
   void _openRoutinePlayer(SavedRoutine routine) {
-    Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        builder: (_) => RoutinePlayerScreen(
-          routine: routine,
-          library: widget.library,
-        ),
-      ),
-    );
+    widget.onOpenRoutinePlayer(routine);
   }
 
   Future<void> _handleGroupConfirm() async {
@@ -936,11 +1094,23 @@ class _LibraryTabState extends State<_LibraryTab> {
     return AnimatedBuilder(
       animation: widget.library,
       builder: (context, _) {
-        final groups = widget.library.groups;
-        final ungrouped = widget.library.ungroupedRoutines;
-        final totalRoutines = widget.library.routines;
+        bool matchesRoutine(SavedRoutine routine) =>
+            RoutineCategory.matches(routine.category, _category);
+        bool matchesPractice(PracticeResult result) => RoutineCategory.matches(
+              widget.library.byId(result.routineId)?.category ?? result.category,
+              _category,
+            );
+        final groups = [
+          for (final group in widget.library.groups)
+            if (widget.library.routinesForGroup(group).any(matchesRoutine)) group,
+        ];
+        final ungrouped = widget.library.ungroupedRoutines.where(matchesRoutine).toList();
+        final favorites = widget.library.favoriteRoutines.where(matchesRoutine).toList();
+        final practiceResults = widget.library.practiceResults.where(matchesPractice).toList();
+        final visiblePractice = practiceResults.take(_practiceVisibleCount).toList();
+        final hasAnyRoutines = widget.library.routines.isNotEmpty;
 
-        if (totalRoutines.isEmpty) {
+        if (!hasAnyRoutines) {
           return Padding(
             padding: const EdgeInsets.all(24),
             child: Column(
@@ -966,185 +1136,230 @@ class _LibraryTabState extends State<_LibraryTab> {
                     IconButton(
                       onPressed: () => _enterSelectionMode(SelectionMode.group),
                       icon: const Icon(Icons.folder_shared),
-                      tooltip: '루틴 묶어서 저장',
+                      tooltip: 'library.tooltip_group'.tr(),
                     ),
                     IconButton(
                       onPressed: () => _enterSelectionMode(SelectionMode.delete),
                       icon: const Icon(Icons.delete_outline),
-                      tooltip: '삭제',
+                      tooltip: 'library.tooltip_delete'.tr(),
                     ),
                   ] else ...[
                     if (_selectionMode == SelectionMode.group)
                       IconButton(
                         onPressed: _handleGroupConfirm,
                         icon: const Icon(Icons.check),
-                        tooltip: '확인',
+                        tooltip: 'library.tooltip_confirm'.tr(),
                       )
                     else
                       IconButton(
                         onPressed: _handleDeleteConfirm,
                         icon: const Icon(Icons.delete, color: Colors.red),
-                        tooltip: '삭제',
+                        tooltip: 'library.tooltip_delete'.tr(),
                       ),
                     IconButton(
                       onPressed: _exitSelectionMode,
                       icon: const Icon(Icons.close),
-                      tooltip: '취소',
+                      tooltip: 'library.tooltip_cancel'.tr(),
                     ),
                   ],
                 ],
               ),
             ),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 24),
-              child: SegmentedButton<int>(
-                segments: const [
-                  ButtonSegment(value: 0, label: Text('내 루틴')),
-                  ButtonSegment(value: 1, label: Text('즐겨찾기')),
-                  ButtonSegment(value: 2, label: Text('연습 기록')),
-                ],
-                selected: {_librarySection},
-                onSelectionChanged: (selection) => setState(() => _librarySection = selection.first),
-              ),
+            CategoryFilterBar(
+              selected: _category,
+              padding: const EdgeInsets.fromLTRB(24, 0, 24, 8),
+              onSelected: (value) {
+                if (_category == value) return;
+                setState(() {
+                  _category = value;
+                  _practiceVisibleCount = kFeedPageSize;
+                });
+              },
+            ),
+            TabBar(
+              controller: _libraryTabs,
+              labelColor: LoopiColors.deepPurple,
+              unselectedLabelColor: Theme.of(context).colorScheme.onSurfaceVariant,
+              indicatorColor: LoopiColors.deepPurple,
+              indicatorSize: TabBarIndicatorSize.tab,
+              tabs: [
+                Tab(text: 'library.tab_my_routines'.tr()),
+                Tab(text: 'library.tab_favorites'.tr()),
+                Tab(text: 'library.tab_practice'.tr()),
+              ],
             ),
             Expanded(
-              child: ListView(
-                padding: const EdgeInsets.fromLTRB(24, 8, 24, 32),
+              child: TabBarView(
+                controller: _libraryTabs,
                 children: [
-                  if (_librarySection == 2)
-                    for (final result in widget.library.practiceResults)
-                      ListTile(
-                        leading: _selectionMode != SelectionMode.none
-                            ? Checkbox(
-                                value: _selectedIds.contains(result.id),
-                                onChanged: (value) {
-                                  if (value == true) {
-                                    _selectedIds.add(result.id);
-                                  } else {
-                                    _selectedIds.remove(result.id);
-                                  }
-                                  setState(() {});
-                                },
-                              )
-                            : const Icon(Icons.video_library_outlined),
-                        title: Text(result.name),
-                        subtitle: Text('연습 기록 · ${result.createdAt.toLocal()}'),
-                        trailing: _selectionMode == SelectionMode.none ? const Icon(Icons.chevron_right) : null,
-                        onTap: () {
-                          if (_selectionMode != SelectionMode.none) {
-                            if (_selectedIds.contains(result.id)) {
-                              _selectedIds.remove(result.id);
-                            } else {
-                              _selectedIds.add(result.id);
-                            }
-                            setState(() {});
-                            return;
-                          }
-                          final routine = widget.library.byId(result.routineId);
-                          if (routine != null) {
-                            widget.onOpenPracticeView(
-                              PracticeResultViewer(routine: routine, result: result),
-                            );
-                          }
-                        },
-                      ),
-                  if (_librarySection == 2 && widget.library.practiceResults.isEmpty)
-                    const Padding(
-                      padding: EdgeInsets.all(24),
-                      child: Text('저장된 연습 기록이 없습니다.'),
-                    ),
-                  if (_librarySection == 1)
-                    for (final routine in widget.library.favoriteRoutines)
-                      Padding(
-                        padding: const EdgeInsets.only(bottom: 10),
-                        child: _RoutineCard(
-                          routine: routine,
-                          library: widget.library,
-                          onStart: () => widget.onOpenRoutinePlayer(routine),
-                          onFavorite: (value) => widget.onFavorite(routine, value),
+                  ListView(
+                    padding: const EdgeInsets.fromLTRB(24, 8, 24, 32),
+                    children: [
+                      if (groups.isEmpty && ungrouped.isEmpty)
+                        Padding(
+                          padding: const EdgeInsets.all(24),
+                          child: Text('library.empty_category'.tr()),
                         ),
-                      ),
-                  if (_librarySection == 1 && widget.library.favoriteRoutines.isEmpty)
-                    const Padding(
-                      padding: EdgeInsets.all(24),
-                      child: Text('즐겨찾기한 루틴이 없습니다.'),
-                    ),
-                  if (_librarySection == 0) ...[
-                  for (final group in groups)
-                    _RoutineGroupCard(
-                      group: group,
-                      routines: widget.library.routinesForGroup(group),
-                      isSelectionMode: _selectionMode != SelectionMode.none,
-                      selectedIds: _selectedIds,
-                      onToggleSelection: _toggleSelection,
-                      onDeleteGroup: () async {
-                        final shouldKeep = await showDialog<bool>(
-                          context: context,
-                          builder: (_) => AlertDialog(
-                            title: const Text('폴더 삭제'),
-                            content: const Text('이 폴더를 삭제할까요? 내부 루틴 원본을 유지하시겠습니까?'),
-                            actions: [
-                              TextButton(
-                                onPressed: () => Navigator.pop(context, true),
-                                child: const Text('원본 유지'),
+                      for (final group in groups)
+                        _RoutineGroupCard(
+                          group: group,
+                          routines: widget.library.routinesForGroup(group).where(matchesRoutine).toList(),
+                          isSelectionMode: _selectionMode != SelectionMode.none,
+                          selectedIds: _selectedIds,
+                          onToggleSelection: _toggleSelection,
+                          onDeleteGroup: () async {
+                            final shouldKeep = await showDialog<bool>(
+                              context: context,
+                              builder: (_) => AlertDialog(
+                                title: Text('library.delete_folder_title'.tr()),
+                                content: Text('library.delete_folder_message'.tr()),
+                                actions: [
+                                  TextButton(
+                                    onPressed: () => Navigator.pop(context, true),
+                                    child: Text('library.keep_originals'.tr()),
+                                  ),
+                                  TextButton(
+                                    onPressed: () => Navigator.pop(context, false),
+                                    child: Text('library.delete_routines_too'.tr()),
+                                  ),
+                                ],
                               ),
-                              TextButton(
-                                onPressed: () => Navigator.pop(context, false),
-                                child: const Text('루틴도 삭제'),
+                            );
+                            if (shouldKeep == null) return;
+                            await widget.library.deleteGroup(group.id, keepRoutines: shouldKeep);
+                          },
+                          onPlayGroup: () {
+                            final playlist = widget.library.routinesForGroup(group);
+                            if (playlist.isEmpty) return;
+                            Navigator.of(context).push(
+                              MaterialPageRoute<void>(
+                                builder: (_) => PracticeModeScreen(
+                                  library: widget.library,
+                                  routine: playlist.first,
+                                  routines: playlist,
+                                  repeatPlaylist: true,
+                                ),
                               ),
-                            ],
-                          ),
-                        );
-                        if (shouldKeep == null) return;
-                        await widget.library.deleteGroup(group.id, keepRoutines: shouldKeep);
-                      },
-                      onPlayGroup: () {
-                        final playlist = widget.library.routinesForGroup(group);
-                        if (playlist.isEmpty) return;
-                        Navigator.of(context).push(
-                          MaterialPageRoute<void>(
-                            builder: (_) => PracticeModeScreen(
-                              library: widget.library,
-                              routine: playlist.first,
-                              routines: playlist,
-                              repeatPlaylist: true,
+                            );
+                          },
+                          onOpenRoutine: widget.onStartRoutine,
+                          onShareRoutine: widget.onShareRoutine,
+                          onEditRoutine: widget.onEditRoutine,
+                          onOpenRoutinePlayer: _openRoutinePlayer,
+                          library: widget.library,
+                        ),
+                      if (ungrouped.isNotEmpty) ...[
+                        const SizedBox(height: 6),
+                        Padding(
+                          padding: const EdgeInsets.only(bottom: 8),
+                          child: Text(
+                            'library.ungrouped'.tr(),
+                            style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                              fontWeight: FontWeight.w700,
                             ),
                           ),
-                        );
-                      },
-                      onOpenRoutine: widget.onStartRoutine,
-                      onShareRoutine: widget.onShareRoutine,
-                      onOpenRoutinePlayer: _openRoutinePlayer,
-                      library: widget.library,
-                    ),
-                  if (ungrouped.isNotEmpty) ...[
-                    const SizedBox(height: 6),
-                    Padding(
-                      padding: const EdgeInsets.only(bottom: 8),
-                      child: Text(
-                        '단독 루틴',
-                        style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                          fontWeight: FontWeight.w700,
                         ),
-                      ),
-                    ),
-                    for (final routine in ungrouped)
-                      Padding(
-                        padding: const EdgeInsets.only(bottom: 10),
-                        child: _RoutineCard(
-                          routine: routine,
-                          library: widget.library,
-                          onStart: () => _openRoutinePlayer(routine),
-                          onShare: () => widget.onShareRoutine(routine),
-                          onFavorite: (value) => widget.onFavorite(routine, value),
-                          isSelected: _selectedIds.contains(routine.id),
-                          onTap: _selectionMode != SelectionMode.none
-                              ? () => _toggleSelection(routine.id)
-                              : null,
+                        for (final routine in ungrouped)
+                          Padding(
+                            padding: const EdgeInsets.only(bottom: 10),
+                            child: _RoutineCard(
+                              routine: routine,
+                              library: widget.library,
+                              onStart: () => _openRoutinePlayer(routine),
+                              onPractice: () => widget.onStartRoutine(routine),
+                              onShare: () => widget.onShareRoutine(routine),
+                              onFavorite: (value) => widget.onFavorite(routine, value),
+                              onEdit: () => widget.onEditRoutine(routine),
+                              isSelected: _selectedIds.contains(routine.id),
+                              onTap: _selectionMode != SelectionMode.none
+                                  ? () => _toggleSelection(routine.id)
+                                  : null,
+                            ),
+                          ),
+                      ],
+                    ],
+                  ),
+                  ListView(
+                    padding: const EdgeInsets.fromLTRB(24, 8, 24, 32),
+                    children: [
+                      if (favorites.isEmpty)
+                        Padding(
+                          padding: const EdgeInsets.all(24),
+                          child: Text('library.empty_favorites'.tr()),
+                        )
+                      else
+                        for (final routine in favorites)
+                          Padding(
+                            padding: const EdgeInsets.only(bottom: 10),
+                            child: _RoutineCard(
+                              routine: routine,
+                              library: widget.library,
+                              onStart: () => widget.onOpenRoutinePlayer(routine),
+                              onPractice: () => widget.onStartRoutine(routine),
+                              onFavorite: (value) => widget.onFavorite(routine, value),
+                              onEdit: () => widget.onEditRoutine(routine),
+                            ),
+                          ),
+                    ],
+                  ),
+                  ListView(
+                    padding: const EdgeInsets.fromLTRB(24, 8, 24, 32),
+                    children: [
+                      if (practiceResults.isEmpty)
+                        Padding(
+                          padding: const EdgeInsets.all(24),
+                          child: Text('library.empty_practice'.tr()),
+                        )
+                      else
+                        for (final result in visiblePractice)
+                          ListTile(
+                            leading: _selectionMode != SelectionMode.none
+                                ? Checkbox(
+                                    value: _selectedIds.contains(result.id),
+                                    onChanged: (value) {
+                                      if (value == true) {
+                                        _selectedIds.add(result.id);
+                                      } else {
+                                        _selectedIds.remove(result.id);
+                                      }
+                                      setState(() {});
+                                    },
+                                  )
+                                : const Icon(Icons.video_library_outlined),
+                            title: Text(result.name),
+                            subtitle: Text('${'library.practice_record'.tr()} · ${result.createdAt.toLocal()}'),
+                            trailing: _selectionMode == SelectionMode.none
+                                ? IconButton(
+                                    tooltip: 'library.tooltip_share'.tr(),
+                                    icon: const Icon(Icons.share_outlined),
+                                    onPressed: () => widget.onSharePracticeResult(result),
+                                  )
+                                : null,
+                            onTap: () {
+                              if (_selectionMode != SelectionMode.none) {
+                                if (_selectedIds.contains(result.id)) {
+                                  _selectedIds.remove(result.id);
+                                } else {
+                                  _selectedIds.add(result.id);
+                                }
+                                setState(() {});
+                                return;
+                              }
+                              final routine = widget.library.byId(result.routineId);
+                              if (routine != null) {
+                                widget.onOpenPracticeView(
+                                  PracticeResultViewer(routine: routine, result: result),
+                                );
+                              }
+                            },
+                          ),
+                      if (practiceResults.length > visiblePractice.length)
+                        TextButton(
+                          onPressed: () => setState(() => _practiceVisibleCount += kFeedPageSize),
+                          child: Text('community.load_more'.tr()),
                         ),
-                      ),
-                  ],
-                  ],
+                    ],
+                  ),
                 ],
               ),
             ),
@@ -1166,6 +1381,7 @@ class _RoutineGroupCard extends StatefulWidget {
     required this.onPlayGroup,
     required this.onOpenRoutine,
     required this.onShareRoutine,
+    required this.onEditRoutine,
     required this.onOpenRoutinePlayer,
     required this.library,
   });
@@ -1179,6 +1395,7 @@ class _RoutineGroupCard extends StatefulWidget {
   final VoidCallback onPlayGroup;
   final ValueChanged<SavedRoutine> onOpenRoutine;
   final ValueChanged<SavedRoutine> onShareRoutine;
+  final ValueChanged<SavedRoutine> onEditRoutine;
   final ValueChanged<SavedRoutine> onOpenRoutinePlayer;
   final RoutineLibrary library;
 
@@ -1220,7 +1437,7 @@ class _RoutineGroupCardState extends State<_RoutineGroupCard> {
                   borderRadius: BorderRadius.circular(999),
                 ),
                 child: Text(
-                  '${widget.routines.length}개',
+                  'library.routine_count'.tr(namedArgs: {'count': '${widget.routines.length}'}),
                   style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700),
                 ),
               ),
@@ -1232,7 +1449,7 @@ class _RoutineGroupCardState extends State<_RoutineGroupCard> {
               IconButton(
                 onPressed: widget.onPlayGroup,
                 icon: const Icon(Icons.play_arrow_rounded),
-                tooltip: '폴더 전체 재생',
+                tooltip: 'library.play_folder'.tr(),
               ),
               PopupMenuButton<String>(
                 onSelected: (value) {
@@ -1241,16 +1458,16 @@ class _RoutineGroupCardState extends State<_RoutineGroupCard> {
                   }
                 },
                 itemBuilder: (_) => [
-                  const PopupMenuItem(value: 'delete', child: Text('폴더 삭제')),
+                  PopupMenuItem(value: 'delete', child: Text('library.delete_folder_title'.tr())),
                 ],
               ),
             ],
           ),
           children: [
             if (widget.routines.isEmpty)
-              const Padding(
-                padding: EdgeInsets.symmetric(vertical: 8),
-                child: Text('폴더에 포함된 루틴이 없습니다.'),
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 8),
+                child: Text('library.empty_folder'.tr()),
               )
             else
               ...widget.routines.map(
@@ -1265,7 +1482,9 @@ class _RoutineGroupCardState extends State<_RoutineGroupCard> {
                       routine: routine,
                       library: widget.library,
                       onStart: () => widget.onOpenRoutinePlayer(routine),
+                      onPractice: () => widget.onOpenRoutine(routine),
                       onShare: () => widget.onShareRoutine(routine),
+                      onEdit: () => widget.onEditRoutine(routine),
                       isSelected: widget.selectedIds.contains(routine.id),
                       onTap: widget.isSelectionMode ? () => widget.onToggleSelection(routine.id) : null,
                     ),
@@ -1291,7 +1510,11 @@ class CommunityFeedScreen extends StatelessWidget {
       onPlay!(routine);
       return;
     }
-    Navigator.of(context).push(MaterialPageRoute<void>(builder: (_) => PracticeModeScreen(routine: routine, library: library)));
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => RoutinePlayerScreen(routine: routine, library: library),
+      ),
+    );
   }
 
   void _openProfile(BuildContext context, CommunityPost post) {
@@ -1313,7 +1536,7 @@ class CommunityFeedScreen extends StatelessWidget {
       animation: feed,
       builder: (context, _) {
         if (feed.posts.isEmpty) {
-          return const Center(child: Text('아직 공유된 루틴이 없습니다.'));
+          return Center(child: Text('community.empty_routines'.tr()));
         }
         return ListView.builder(
               padding: const EdgeInsets.fromLTRB(20, 20, 20, 32),
@@ -1327,7 +1550,7 @@ class CommunityFeedScreen extends StatelessWidget {
                     onTap: () => _play(context, routine),
                     leading: IconButton(
                       onPressed: () => _play(context, routine),
-                      tooltip: '재생',
+                      tooltip: 'player.play'.tr(),
                       icon: const Icon(Icons.play_circle_fill, size: 34),
                     ),
                     title: Text(routine.name),
@@ -1339,7 +1562,7 @@ class CommunityFeedScreen extends StatelessWidget {
                           style: TextButton.styleFrom(padding: EdgeInsets.zero),
                           child: Text('@${post.authorName}'),
                         ),
-                        Text(post.description.isEmpty ? '설명 없음' : post.description),
+                        Text(post.description.isEmpty ? 'community.no_description'.tr() : post.description),
                       ],
                     ),
                     trailing: FavoriteButton(
@@ -1385,7 +1608,9 @@ class UserProfileRoutinesScreen extends StatelessWidget {
             title: Text(routine.name),
             subtitle: Text(post.description),
             onTap: () => Navigator.of(context).push(
-              MaterialPageRoute<void>(builder: (_) => PracticeModeScreen(routine: routine, library: library)),
+              MaterialPageRoute<void>(
+                builder: (_) => RoutinePlayerScreen(routine: routine, library: library),
+              ),
             ),
           );
         },

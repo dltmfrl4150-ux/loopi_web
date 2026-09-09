@@ -1,16 +1,23 @@
-import 'dart:convert';
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/routine_models.dart';
+import '../services/auth_service.dart';
+import '../services/database_service.dart';
 
-/// In-memory library of saved routine presets for the current session.
+/// Saved routine presets, backed by SharedPreferences and optionally Firestore.
 class RoutineLibrary extends ChangeNotifier {
   static const String _routineStorageKey = 'loopi_saved_routines';
   static const String _groupStorageKey = 'loopi_saved_groups';
   static const String _practiceStorageKey = 'loopi_practice_results';
+
+  RoutineLibrary({DatabaseService? database}) : _database = database ?? DatabaseService();
+
+  final DatabaseService _database;
+  String? _uid;
 
   final List<SavedRoutine> _routines = [];
   final List<RoutineGroup> _groups = [];
@@ -46,18 +53,56 @@ class RoutineLibrary extends ChangeNotifier {
             .map(RoutineGroup.fromJson)
             .toList(),
       );
-            _practiceResults
-          ..clear()
-          ..addAll(
-            savedPracticeResults
+    _practiceResults
+      ..clear()
+      ..addAll(
+        savedPracticeResults
             .map((value) => jsonDecode(value))
             .whereType<Map<String, dynamic>>()
             .map(PracticeResult.fromJson),
-          );
+      );
     notifyListeners();
   }
 
+  Future<void> attachUser(String uid) async {
+    _uid = uid;
+    if (!FirebaseBootstrap.initialized) return;
+    try {
+      final cloud = await _database.fetchLibrary(uid);
+      if (cloud.routines.isEmpty && cloud.groups.isEmpty && cloud.practiceResults.isEmpty) {
+        if (_routines.isNotEmpty || _groups.isNotEmpty || _practiceResults.isNotEmpty) {
+          await _syncCloud();
+        }
+        return;
+      }
+      _routines
+        ..clear()
+        ..addAll(cloud.routines);
+      _groups
+        ..clear()
+        ..addAll(cloud.groups);
+      // Practice recordings stay local-first. Do not replace in-session blobs
+      // with cloud metadata that has no playable file.
+      if (_practiceResults.isEmpty && cloud.practiceResults.isNotEmpty) {
+        _practiceResults.addAll(cloud.practiceResults);
+      }
+      notifyListeners();
+      await _persistLocal();
+    } catch (error) {
+      debugPrint('attachUser error: $error');
+    }
+  }
+
+  void detachUser() {
+    _uid = null;
+  }
+
   Future<void> _persist() async {
+    await _persistLocal();
+    unawaited(_syncCloud());
+  }
+
+  Future<void> _persistLocal() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setStringList(
       _routineStorageKey,
@@ -69,7 +114,18 @@ class RoutineLibrary extends ChangeNotifier {
     );
     await prefs.setStringList(
       _practiceStorageKey,
-      _practiceResults.map((result) => jsonEncode(result.toJson())).toList(),
+      _practiceResults.map((result) => jsonEncode(result.toLocalJson())).toList(),
+    );
+  }
+
+  Future<void> _syncCloud() async {
+    final uid = _uid;
+    if (uid == null || !FirebaseBootstrap.initialized) return;
+    await _database.saveLibrary(
+      uid: uid,
+      routines: _routines,
+      groups: _groups,
+      practiceResults: const [],
     );
   }
 
@@ -100,8 +156,19 @@ class RoutineLibrary extends ChangeNotifier {
 
   Future<void> save(SavedRoutine routine) async {
     _routines.insert(0, routine);
-    await _persist();
     notifyListeners();
+    await _persist();
+  }
+
+  Future<void> update(SavedRoutine routine) async {
+    final index = _routines.indexWhere((item) => item.id == routine.id);
+    if (index < 0) {
+      await save(routine);
+      return;
+    }
+    _routines[index] = routine;
+    notifyListeners();
+    await _persist();
   }
 
   Future<void> setFavorite(String id, bool value) async {
@@ -109,13 +176,15 @@ class RoutineLibrary extends ChangeNotifier {
     if (index < 0 || _routines[index].isFavorite == value) return;
     _routines[index] = _routines[index].copyWith(isFavorite: value);
     notifyListeners();
-    await Future<void>.microtask(() => _persist());
+    Future.delayed(Duration.zero, () {
+      unawaited(_persist());
+    });
   }
 
   Future<void> savePracticeResult(PracticeResult result) async {
     _practiceResults.insert(0, result);
     notifyListeners();
-    unawaited(_persist());
+    await _persistLocal();
   }
 
   bool? toggleFavoriteOptimistic(String id) {
@@ -140,29 +209,26 @@ class RoutineLibrary extends ChangeNotifier {
     _groups
       ..clear()
       ..addAll(nextGroups);
-    await _persist();
     notifyListeners();
+    await _persist();
   }
 
   Future<void> deletePracticeResult(String id) async {
     _practiceResults.removeWhere((result) => result.id == id);
-    await _persist();
     notifyListeners();
+    await _persist();
   }
 
   Future<void> deleteManyPracticeResults(Iterable<String> ids) async {
     final idSet = ids.toSet();
     if (idSet.isEmpty) return;
     _practiceResults.removeWhere((result) => idSet.contains(result.id));
-    await _persist();
     notifyListeners();
+    await _persist();
   }
 
   Future<void> createGroup({required String name, required List<String> routineIds}) async {
-    final unique = routineIds
-        .where((id) => id.isNotEmpty)
-        .toSet()
-        .toList();
+    final unique = routineIds.where((id) => id.isNotEmpty).toSet().toList();
     if (unique.isEmpty) return;
     final nextGroups = <RoutineGroup>[];
     for (final group in _groups) {
@@ -181,8 +247,8 @@ class RoutineLibrary extends ChangeNotifier {
     _groups
       ..clear()
       ..addAll(nextGroups);
-    await _persist();
     notifyListeners();
+    await _persist();
   }
 
   Future<void> deleteGroup(String groupId, {bool keepRoutines = true}) async {
@@ -193,15 +259,15 @@ class RoutineLibrary extends ChangeNotifier {
       await deleteMany(group.routineIds);
       return;
     }
-    await _persist();
     notifyListeners();
+    await _persist();
   }
 
   Future<void> renameGroup(String groupId, String title) async {
     final index = _groups.indexWhere((group) => group.id == groupId);
     if (index < 0) return;
     _groups[index] = _groups[index].copyWith(title: title.trim().isEmpty ? '새 폴더' : title.trim());
-    await _persist();
     notifyListeners();
+    await _persist();
   }
 }

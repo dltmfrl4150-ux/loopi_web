@@ -1,8 +1,11 @@
+import 'package:easy_localization/easy_localization.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:pointer_interceptor/pointer_interceptor.dart';
 
+import '../models/routine_category.dart';
 import '../theme/loopi_colors.dart';
+import 'category_filter_chips.dart';
 
 String defaultRoutineName([DateTime? now]) {
   final date = now ?? DateTime.now();
@@ -12,24 +15,56 @@ String defaultRoutineName([DateTime? now]) {
   return '$y-$m-$d Routine';
 }
 
-/// Shows the Save Routine Preset modal. Returns a trimmed name, or null if closed.
-Future<String?> showSaveRoutineDialog(BuildContext context) {
-  return showDialog<String>(
+class SaveRoutineDialogResult {
+  const SaveRoutineDialogResult({
+    required this.name,
+    this.overwrite = false,
+    this.category = RoutineCategory.dance,
+  });
+
+  final String name;
+  final bool overwrite;
+  final String category;
+}
+
+/// Shows the Save Routine Preset modal.
+/// Returns [SaveRoutineDialogResult], or null if closed.
+Future<SaveRoutineDialogResult?> showSaveRoutineDialog(
+  BuildContext context, {
+  String? initialName,
+  bool allowOverwrite = false,
+  String? initialCategory,
+}) {
+  return showDialog<SaveRoutineDialogResult>(
     context: context,
     barrierDismissible: false,
     useRootNavigator: true,
     builder: (dialogContext) {
       return PointerInterceptor(
-        child: SaveRoutineDialog(dialogContext: dialogContext),
+        child: SaveRoutineDialog(
+          dialogContext: dialogContext,
+          initialName: initialName,
+          allowOverwrite: allowOverwrite,
+          initialCategory: initialCategory,
+        ),
       );
     },
   );
 }
 
 class SaveRoutineDialog extends StatefulWidget {
-  const SaveRoutineDialog({super.key, this.dialogContext});
+  const SaveRoutineDialog({
+    super.key,
+    this.dialogContext,
+    this.initialName,
+    this.allowOverwrite = false,
+    this.initialCategory,
+  });
 
   final BuildContext? dialogContext;
+  final String? initialName;
+  final bool allowOverwrite;
+  final String? initialCategory;
 
   @override
   State<SaveRoutineDialog> createState() => _SaveRoutineDialogState();
@@ -40,16 +75,25 @@ class _SaveRoutineDialogState extends State<SaveRoutineDialog> {
   late final TextEditingController _routineNameController;
   late final FocusNode _focusNode;
   bool _clearedOnFirstFocus = false;
+  late String _category;
 
   BuildContext get _dialogContext => widget.dialogContext ?? context;
 
   @override
   void initState() {
     super.initState();
-    _suggestedName = defaultRoutineName();
+    _suggestedName = (widget.initialName != null && widget.initialName!.trim().isNotEmpty)
+        ? widget.initialName!.trim()
+        : defaultRoutineName();
     _routineNameController = TextEditingController(text: _suggestedName);
     _focusNode = FocusNode();
-    _focusNode.addListener(_onFocusChange);
+    _category = RoutineCategory.normalize(widget.initialCategory);
+    // Keep existing name when editing; only clear default date names on focus for new routines.
+    if (!widget.allowOverwrite) {
+      _focusNode.addListener(_onFocusChange);
+    } else {
+      _clearedOnFirstFocus = true;
+    }
   }
 
   void _onFocusChange() {
@@ -72,9 +116,15 @@ class _SaveRoutineDialogState extends State<SaveRoutineDialog> {
     Navigator.of(_dialogContext).pop();
   }
 
-  void _save() {
+  void _submit({required bool overwrite}) {
     final typed = _routineNameController.text.trim();
-    Navigator.of(_dialogContext).pop(typed.isEmpty ? _suggestedName : typed);
+    Navigator.of(_dialogContext).pop(
+      SaveRoutineDialogResult(
+        name: typed.isEmpty ? _suggestedName : typed,
+        overwrite: overwrite,
+        category: _category,
+      ),
+    );
   }
 
   @override
@@ -84,9 +134,9 @@ class _SaveRoutineDialogState extends State<SaveRoutineDialog> {
         return AlertDialog(
           backgroundColor: Colors.white,
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-          title: const Text(
-            'Save Routine Preset',
-            style: TextStyle(
+          title: Text(
+            widget.allowOverwrite ? 'studio.save_dialog_title'.tr() : 'studio.save_dialog_title'.tr(),
+            style: const TextStyle(
               fontSize: 20,
               fontWeight: FontWeight.w700,
               color: LoopiColors.ink,
@@ -98,9 +148,11 @@ class _SaveRoutineDialogState extends State<SaveRoutineDialog> {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                const Text(
-                  'Name this loop routine before starting Practice Mode.',
-                  style: TextStyle(color: LoopiColors.muted, fontSize: 13),
+                Text(
+                  widget.allowOverwrite
+                      ? 'studio.save_overwrite_hint'.tr()
+                      : 'studio.save_name_hint'.tr(),
+                  style: const TextStyle(color: LoopiColors.muted, fontSize: 13),
                 ),
                 const SizedBox(height: 18),
                 TextField(
@@ -112,7 +164,7 @@ class _SaveRoutineDialogState extends State<SaveRoutineDialog> {
                   textInputAction: TextInputAction.done,
                   inputFormatters: [LengthLimitingTextInputFormatter(80)],
                   onChanged: (value) => setDialogState(() {}),
-                  onSubmitted: (_) => _save(),
+                  onSubmitted: (_) => _submit(overwrite: false),
                   decoration: InputDecoration(
                     labelText: 'Routine name',
                     hintText: _suggestedName,
@@ -128,6 +180,20 @@ class _SaveRoutineDialogState extends State<SaveRoutineDialog> {
                     ),
                   ),
                 ),
+                const SizedBox(height: 18),
+                Text(
+                  'category.label'.tr(),
+                  style: const TextStyle(
+                    color: LoopiColors.ink,
+                    fontWeight: FontWeight.w700,
+                    fontSize: 13,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                CategoryChoiceChips(
+                  selected: _category,
+                  onSelected: (value) => setDialogState(() => _category = value),
+                ),
               ],
             ),
           ),
@@ -142,10 +208,23 @@ class _SaveRoutineDialogState extends State<SaveRoutineDialog> {
                   borderRadius: BorderRadius.circular(12),
                 ),
               ),
-              child: const Text('Close'),
+              child: Text('common.close'.tr()),
             ),
+            if (widget.allowOverwrite)
+              FilledButton(
+                onPressed: () => _submit(overwrite: true),
+                style: FilledButton.styleFrom(
+                  backgroundColor: Colors.redAccent,
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+                child: Text('studio.overwrite'.tr()),
+              ),
             FilledButton(
-              onPressed: _save,
+              onPressed: () => _submit(overwrite: false),
               style: FilledButton.styleFrom(
                 backgroundColor: LoopiColors.purple,
                 foregroundColor: Colors.white,
@@ -154,7 +233,7 @@ class _SaveRoutineDialogState extends State<SaveRoutineDialog> {
                   borderRadius: BorderRadius.circular(12),
                 ),
               ),
-              child: const Text('Save'),
+              child: Text('studio.save'.tr()),
             ),
           ],
         );

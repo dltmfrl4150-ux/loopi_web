@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:youtube_player_iframe/youtube_player_iframe.dart';
@@ -15,14 +16,24 @@ import '../models/routine_models.dart';
 import '../state/link_studio_session.dart';
 import '../state/routine_library.dart';
 import '../theme/loopi_colors.dart';
+import '../utils/cached_video.dart';
 import '../utils/time_format.dart';
 import '../utils/youtube_id.dart';
+import '../utils/youtube_player_factory.dart';
 import '../utils/media_blob.dart';
 import '../widgets/app_logo.dart';
+import '../widgets/highlight_interval.dart';
 import '../widgets/save_routine_dialog.dart';
 import 'practice_mode_screen.dart';
 
 const String kDefaultVideoUrl = 'https://www.youtube.com/watch?v=M7lc1UVf-VE';
+
+const double _kStudioHPad = 16;
+const double _kStudioVPad = 12;
+const double _kStudioUrlGap = 12;
+const double _kStudioUrlBarHeight = 64;
+const double _kStudioColumnGap = 6;
+const double _kStudioMinSettingsWidth = 240;
 
 String? _platformFilePath(PlatformFile? file) {
   if (file == null || kIsWeb) return null;
@@ -47,18 +58,25 @@ class LinkStudioScreen extends StatefulWidget {
     this.initialVideoUrl = kDefaultVideoUrl,
     this.sourceType = SourceType.youtube,
     this.embedded = false,
+    this.active = true,
     this.file,
     this.localFilePath,
     this.fileName,
+    this.editingRoutine,
   });
 
   final RoutineLibrary library;
   final String initialVideoUrl;
   final SourceType sourceType;
   final bool embedded;
+  /// When false (e.g. another bottom-nav tab is selected), playback pauses.
+  final bool active;
   final PlatformFile? file;
   final String? localFilePath;
   final String? fileName;
+  final SavedRoutine? editingRoutine;
+
+  bool get isEditMode => editingRoutine != null;
 
   @override
   State<LinkStudioScreen> createState() => _LinkStudioScreenState();
@@ -97,32 +115,88 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
   int _highlightedSection = 0;
   Completer<void>? _delayCompleter;
   String? _lastDetectedClipboardText;
+  String? _dismissedClipboardRaw;
   String? _mediaObjectUrl;
   bool _audioLoading = false;
   String? _videoLoadError;
-  bool _showClipboardBanner = true;
+  bool _showClipboardBanner = false;
+  bool? _isMirrored = false;
+  bool _disposing = false;
+  final ScrollController _routineListHorizontalController = ScrollController();
+  final ScrollController _routineListVerticalController = ScrollController();
+
+  bool get _youtubeAlive => !_disposing && _youtubeInitialized && mounted;
+
+  Future<T?> _yt<T>(Future<T> Function() action) {
+    return safeYoutubePlayerCall(action, isAlive: () => _youtubeAlive);
+  }
 
   bool get _inWidgetTest =>
       WidgetsBinding.instance.runtimeType.toString().contains('TestWidgetsFlutterBinding');
+
+  bool get _isYouTubeShortsUrl => _videoUrl.toLowerCase().contains('/shorts/');
+
+  double get _mediaAspectRatio {
+    if (_session.sourceType == SourceType.audio) return 16 / 9;
+    if (_videoPlayer != null && _videoPlayer!.value.isInitialized) {
+      final size = _videoPlayer!.value.size;
+      if (size.width > 0 && size.height > 0) {
+        return size.width / size.height;
+      }
+      final ratio = _videoPlayer!.value.aspectRatio;
+      if (ratio > 0) return ratio;
+    }
+    if (_isYouTubeShortsUrl) return 9 / 16;
+    return 16 / 9;
+  }
+
+  bool get _isVerticalMedia =>
+      _session.sourceType != SourceType.audio && _mediaAspectRatio < 1;
+
+  bool _videoFitsInColumn(BoxConstraints constraints, double ratio) {
+    final availableH = constraints.maxHeight;
+    final availableW = constraints.maxWidth;
+    if (availableH <= 0 || availableW <= 0 || ratio <= 0) return true;
+    final contentW = (availableW - _kStudioHPad * 2).clamp(1.0, availableW);
+    final videoH = contentW / ratio;
+    final needed = _kStudioVPad * 2 + _kStudioUrlBarHeight + _kStudioUrlGap + videoH;
+    return needed + 8 <= availableH;
+  }
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _videoUrl = widget.initialVideoUrl;
-    _urlController.text = _videoUrl;
-    _videoId = extractYoutubeVideoId(_videoUrl) ?? 'M7lc1UVf-VE';
+    final editing = widget.editingRoutine;
+    if (editing != null) {
+      _videoUrl = editing.videoUrl.isNotEmpty ? editing.videoUrl : kDefaultVideoUrl;
+      _videoId = resolveYoutubeVideoId(videoId: editing.videoId, videoUrl: _videoUrl) ??
+          'M7lc1UVf-VE';
+      _urlController.text = _videoUrl;
+      _session.loadFromRoutine(editing);
+      _isMirrored = editing.isMirroredOn;
+    } else {
+      _videoUrl = widget.initialVideoUrl;
+      _urlController.text = _videoUrl;
+      _videoId = extractYoutubeVideoId(_videoUrl) ?? 'M7lc1UVf-VE';
+      _session.setSourceType(
+        widget.sourceType,
+        localFilePath: _platformFilePath(widget.file) ?? widget.localFilePath,
+        fileName: widget.file?.name ?? widget.fileName,
+        localDataBytes: widget.file?.bytes,
+      );
+    }
     _syncRowControllers();
     _session.addListener(_onSessionChanged);
 
-    _session.setSourceType(
-      widget.sourceType,
-      localFilePath: _platformFilePath(widget.file) ?? widget.localFilePath,
-      fileName: widget.file?.name ?? widget.fileName,
-      localDataBytes: widget.file?.bytes,
-    );
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && widget.active) {
+        unawaited(_checkClipboardForDetectedLink());
+      }
+    });
 
-    switch (widget.sourceType) {
+    final sourceType = editing?.sourceType ?? widget.sourceType;
+    switch (sourceType) {
       case SourceType.youtube:
         if (!_inWidgetTest) {
           _initializeYouTubePlayer();
@@ -138,26 +212,55 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
   }
 
   Future<void> _initializeYouTubePlayer() async {
-    _youtubePlayer = YoutubePlayerController.fromVideoId(
+    _youtubePlayer = createLoopiYoutubeController(
       videoId: _videoId,
       autoPlay: false,
-      params: const YoutubePlayerParams(
-        mute: false,
-        showFullscreenButton: true,
-        showControls: true,
-        loop: false,
-        captionLanguage: 'en',
-        enableKeyboard: true,
-      ),
     );
     _youtubeInitialized = true;
-    _valueSub = _youtubePlayer.stream.listen(_onPlayerValue);
-    _stateSub = _youtubePlayer.videoStateStream.listen(_onVideoState);
+    _valueSub = listenYoutubeStream(
+      _youtubePlayer.stream,
+      _onPlayerValue,
+      isAlive: () => _youtubeAlive,
+    );
+    _stateSub = listenYoutubeStream(
+      _youtubePlayer.videoStateStream,
+      _onVideoState,
+      isAlive: () => _youtubeAlive,
+    );
+  }
+
+  @override
+  void didUpdateWidget(LinkStudioScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.active && !widget.active) {
+      _haltPlayback(stopTest: true);
+    } else if (!oldWidget.active && widget.active) {
+      unawaited(_checkClipboardForDetectedLink());
+    }
+  }
+
+  @override
+  void deactivate() {
+    _haltPlayback();
+    super.deactivate();
+  }
+
+  void _haltPlayback({bool stopTest = false}) {
+    _loopPlaybackTimer?.cancel();
+    _delayTimer?.cancel();
+    _routineTimer?.cancel();
+    _playbackMonitorTimer?.cancel();
+    if (stopTest && _session.isTesting) {
+      _routineSessionId++;
+      _session.stopTest();
+    }
+    unawaited(_pause());
   }
 
   Future<void> _initializeVideoPlayer() async {
-    final path = _platformFilePath(widget.file) ?? widget.localFilePath;
-    if (path != null) {
+    final editing = widget.editingRoutine;
+    final path = _platformFilePath(widget.file) ?? widget.localFilePath ?? editing?.localFilePath;
+    if (path != null && !kIsWeb) {
       _videoPlayer = VideoPlayerController.file(File(path));
     } else if (widget.file?.bytes != null) {
       final extension = widget.file!.extension?.toLowerCase();
@@ -172,6 +275,14 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
           ? Uri.dataFromBytes(widget.file!.bytes!, mimeType: mimeType)
           : Uri.parse(_mediaObjectUrl!);
       _videoPlayer = VideoPlayerController.networkUrl(uri);
+    } else if (editing?.localDataBytes != null) {
+      _mediaObjectUrl = createMediaBlobUrl(editing!.localDataBytes!, 'video/mp4');
+      final uri = _mediaObjectUrl == null
+          ? Uri.dataFromBytes(editing.localDataBytes!, mimeType: 'video/mp4')
+          : Uri.parse(_mediaObjectUrl!);
+      _videoPlayer = VideoPlayerController.networkUrl(uri);
+    } else if (path != null) {
+      _videoPlayer = createCachedNetworkVideo(Uri.parse(path));
     } else {
       return;
     }
@@ -194,13 +305,18 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
   Future<void> _initializeAudioPlayer() async {
     _audioLoading = true;
     if (mounted) setState(() {});
-    final path = _platformFilePath(widget.file) ?? widget.localFilePath;
+    final editing = widget.editingRoutine;
+    final path = _platformFilePath(widget.file) ?? widget.localFilePath ?? editing?.localFilePath;
     _audioPlayer = AudioPlayer();
     try {
-      if (path != null) {
+      if (path != null && !kIsWeb) {
         await _audioPlayer!.setSourceDeviceFile(path);
       } else if (widget.file?.bytes != null) {
         await _audioPlayer!.setSourceBytes(widget.file!.bytes!);
+      } else if (editing?.localDataBytes != null) {
+        await _audioPlayer!.setSourceBytes(Uint8List.fromList(editing!.localDataBytes!));
+      } else if (path != null) {
+        await _audioPlayer!.setSourceUrl(path);
       } else {
         return;
       }
@@ -321,16 +437,12 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
 
   void _onTimeChanged(String value, int index, bool isStart) {
     if (value.isEmpty) return;
-    final parts = value.split(':');
-    if (parts.length == 2) {
-      try {
-        final minutes = int.parse(parts[0]);
-        final seconds = int.parse(parts[1]);
-        if (minutes >= 0 && seconds >= 0 && seconds < 60) {
-          _commitTimeField(index: index, isStart: isStart, allowSeek: true);
-        }
-      } catch (_) {}
-    }
+    final digits = value.replaceAll(RegExp(r'[^0-9]'), '');
+    final hasColon = value.contains(':');
+    final complete = (hasColon && value.split(':').length >= 2) || digits.length >= 4;
+    if (!complete) return;
+    if (parseTimeInput(value) == null) return;
+    _commitTimeField(index: index, isStart: isStart, allowSeek: true);
   }
 
   Future<void> _seekTo(double seconds, {bool force = false}) async {
@@ -347,7 +459,9 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
     try {
       switch (_session.sourceType) {
         case SourceType.youtube:
-          await _youtubePlayer.seekTo(seconds: seconds, allowSeekAhead: true);
+          await _yt(
+            () => _youtubePlayer.seekTo(seconds: seconds, allowSeekAhead: true),
+          );
           break;
         case SourceType.localVideo:
           await _videoPlayer?.seekTo(Duration(milliseconds: (seconds * 1000).toInt()));
@@ -364,7 +478,7 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
     try {
       switch (_session.sourceType) {
         case SourceType.youtube:
-          await _youtubePlayer.setPlaybackRate(speed);
+          await _yt(() => _youtubePlayer.setPlaybackRate(speed));
           break;
         case SourceType.localVideo:
           await _videoPlayer?.setPlaybackSpeed(speed);
@@ -381,7 +495,7 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
     try {
       switch (_session.sourceType) {
         case SourceType.youtube:
-          await _youtubePlayer.pauseVideo();
+          await _yt(() => _youtubePlayer.pauseVideo());
           break;
         case SourceType.localVideo:
           await _videoPlayer?.pause();
@@ -396,7 +510,7 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
   Future<double> _getCurrentTime() async {
     switch (_session.sourceType) {
       case SourceType.youtube:
-        return await _youtubePlayer.currentTime;
+        return await _yt(() => _youtubePlayer.currentTime) ?? 0;
       case SourceType.localVideo:
         final position = _videoPlayer?.value.position.inMilliseconds;
         return position != null ? position / 1000.0 : 0;
@@ -439,7 +553,7 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
       _videoId = id;
       _videoUrl = trimmed;
     });
-    await _youtubePlayer.cueVideoById(videoId: id);
+    await _yt(() => _youtubePlayer.cueVideoById(videoId: id));
   }
 
   String? _normalizeYoutubeUrl(String input) {
@@ -465,8 +579,18 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
   }
 
   Future<void> _pasteFromClipboard() async {
-    final clipboardData = await Clipboard.getData(Clipboard.kTextPlain);
-    final pasted = clipboardData?.text?.trim();
+    String? pasted;
+    try {
+      final clipboardData = await Clipboard.getData(Clipboard.kTextPlain);
+      pasted = clipboardData?.text?.trim();
+    } catch (error) {
+      debugPrint('Clipboard.getData paste failed: $error');
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('studio.url_placeholder'.tr())),
+      );
+      return;
+    }
     if (pasted == null || pasted.isEmpty) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -508,50 +632,70 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
     }
   }
 
+  void _dismissClipboardBanner({String? rawClipboard}) {
+    if (!mounted) {
+      _showClipboardBanner = false;
+      _dismissedClipboardRaw = rawClipboard ?? _dismissedClipboardRaw;
+      return;
+    }
+    setState(() {
+      _showClipboardBanner = false;
+      _dismissedClipboardRaw = rawClipboard ?? _dismissedClipboardRaw;
+    });
+    ScaffoldMessenger.maybeOf(context)?.hideCurrentSnackBar();
+  }
+
   Future<void> _checkClipboardForDetectedLink() async {
-    if (!_showClipboardBanner) return;
-    
-    final clipboardData = await Clipboard.getData(Clipboard.kTextPlain);
-    final text = clipboardData?.text?.trim();
+    String? text;
+    try {
+      final clipboardData = await Clipboard.getData(Clipboard.kTextPlain);
+      text = clipboardData?.text?.trim();
+    } catch (error) {
+      // Flutter Web throws paste_fail when clipboard permission is denied
+      // or the read is not tied to a user gesture.
+      debugPrint('Clipboard.getData detection skipped: $error');
+      return;
+    }
     if (text == null || text.isEmpty) return;
+    // Ignore the same copied text until the clipboard actually changes.
+    if (text == _dismissedClipboardRaw) return;
 
     final normalized = _normalizeYoutubeUrl(text);
-    if (normalized == null || normalized == _lastDetectedClipboardText) return;
+    if (normalized == null) return;
+    if (_showClipboardBanner && normalized == _lastDetectedClipboardText) return;
 
     _lastDetectedClipboardText = normalized;
     if (!mounted) return;
 
     _urlController.text = normalized;
+    setState(() => _showClipboardBanner = true);
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
+    ScaffoldMessenger.of(context).clearSnackBars();
+    ScaffoldMessenger.of(context)
+        .showSnackBar(
       SnackBar(
-        content: Row(
-          children: [
-            Expanded(
-              child: Text('link_studio.detected_copied_link'.tr()),
-            ),
-            IconButton(
-              icon: const Icon(Icons.close, size: 16),
-              onPressed: () {
-                ScaffoldMessenger.of(context).hideCurrentSnackBar();
-                setState(() => _showClipboardBanner = false);
-              },
-              padding: EdgeInsets.zero,
-              constraints: const BoxConstraints(),
-            ),
-          ],
-        ),
+        content: Text('link_studio.detected_copied_link'.tr()),
+        showCloseIcon: true,
+        closeIconColor: Colors.redAccent,
         action: SnackBarAction(
           label: 'studio.load'.tr(),
           onPressed: () {
+            _dismissClipboardBanner(rawClipboard: text);
             _loadUrl();
           },
         ),
         duration: const Duration(seconds: 10),
       ),
-    ).closed.then((_) {
-      if (mounted) {
-        setState(() => _showClipboardBanner = false);
+    )
+        .closed
+        .then((reason) {
+      if (!mounted) return;
+      if (reason == SnackBarClosedReason.action) return;
+      setState(() => _showClipboardBanner = false);
+      if (reason == SnackBarClosedReason.dismiss ||
+          reason == SnackBarClosedReason.swipe ||
+          reason == SnackBarClosedReason.timeout) {
+        _dismissedClipboardRaw = text;
       }
     });
   }
@@ -560,6 +704,12 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
       unawaited(_checkClipboardForDetectedLink());
+      return;
+    }
+    if (state == AppLifecycleState.inactive ||
+        state == AppLifecycleState.paused ||
+        state == AppLifecycleState.hidden) {
+      _haltPlayback();
     }
   }
 
@@ -671,11 +821,12 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
 
       switch (_session.sourceType) {
         case SourceType.youtube:
-          await _youtubePlayer.setPlaybackRate(speed);
+          await _yt(() => _youtubePlayer.setPlaybackRate(speed));
           await _seekTo(startSec, force: true);
           await Future<void>.delayed(waitDuration);
           _isSeeking = false;
-          await _youtubePlayer.playVideo();
+          if (!_youtubeAlive) return;
+          await _yt(() => _youtubePlayer.playVideo());
           break;
         case SourceType.localVideo:
           await _videoPlayer?.setPlaybackSpeed(speed);
@@ -771,7 +922,7 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
       final segment = _session.testSegment;
       switch (_session.sourceType) {
         case SourceType.youtube:
-          await _youtubePlayer.setPlaybackRate(segment.speed);
+          await _yt(() => _youtubePlayer.setPlaybackRate(segment.speed));
           await _seekTo(segment.startSec, force: true);
           break;
         case SourceType.localVideo:
@@ -790,7 +941,7 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
     try {
       switch (_session.sourceType) {
         case SourceType.youtube:
-          await _youtubePlayer.playVideo();
+          await _yt(() => _youtubePlayer.playVideo());
           break;
         case SourceType.localVideo:
           await _videoPlayer?.play();
@@ -854,20 +1005,56 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
     }
     if (!mounted) return;
 
-    final name = await showSaveRoutineDialog(context);
+    final editing = widget.editingRoutine;
+    final result = await showSaveRoutineDialog(
+      context,
+      initialName: editing?.name,
+      allowOverwrite: editing != null,
+      initialCategory: editing?.category,
+    );
     if (!mounted) return;
     setState(() => _saveDialogOpen = false);
-    if (name == null) return;
+    if (result == null) return;
 
+    final overwrite = result.overwrite && editing != null;
     final routine = _session.toSavedRoutine(
-      name: name,
+      name: result.name,
       videoUrl: _videoUrl,
       videoId: _videoId,
+      id: overwrite ? editing.id : null,
+      createdAt: overwrite ? editing.createdAt : null,
+      isFavorite: overwrite ? editing.isFavorite : false,
+      authorId: overwrite ? editing.authorId : 'me',
+      authorName: overwrite ? editing.authorName : '나',
+      category: result.category,
+      isMirrored: _isMirrored ?? false,
     );
-    widget.library.save(routine);
+
+    if (overwrite) {
+      await widget.library.update(routine);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('"${result.name}" 루틴을 덮어썼습니다.')),
+      );
+      if (Navigator.of(context).canPop()) {
+        Navigator.of(context).pop(routine);
+      }
+      return;
+    }
+
+    await widget.library.save(routine);
+    if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('"$name" ${'studio.save_success'.tr()}')),
+      SnackBar(content: Text('"${result.name}" ${'studio.save_success'.tr()}')),
     );
+
+    if (editing != null) {
+      if (Navigator.of(context).canPop()) {
+        Navigator.of(context).pop(routine);
+      }
+      return;
+    }
+
     await Navigator.of(context).push(
       MaterialPageRoute<void>(
         builder: (_) => PracticeModeScreen(routine: routine, library: widget.library),
@@ -877,15 +1064,21 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
 
   @override
   void dispose() {
+    _disposing = true;
     WidgetsBinding.instance.removeObserver(this);
+    _haltPlayback();
     _loopPlaybackTimer?.cancel();
     _delayTimer?.cancel();
     _routineTimer?.cancel();
     _playbackMonitorTimer?.cancel();
     _valueSub?.cancel();
     _stateSub?.cancel();
+    _valueSub = null;
+    _stateSub = null;
     _session.removeListener(_onSessionChanged);
     _session.dispose();
+    _routineListHorizontalController.dispose();
+    _routineListVerticalController.dispose();
     _urlController.dispose();
     for (final c in _startControllers) {
       c.dispose();
@@ -902,7 +1095,7 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
       n.dispose();
     }
     if (_youtubeInitialized) {
-      _youtubePlayer.close();
+      unawaited(closeYoutubePlayerSafely(_youtubePlayer));
     }
     _videoPlayer?.dispose();
     _audioPlayer?.dispose();
@@ -939,7 +1132,7 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
     }
     return YoutubePlayerScaffold(
       controller: _youtubePlayer,
-      aspectRatio: 16 / 9,
+      aspectRatio: _isVerticalMedia ? 9 / 16 : 16 / 9,
       builder: (context, player) {
         return _buildMainScaffold(
           testing: testing,
@@ -982,13 +1175,7 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
               ),
             )
           : _videoPlayer != null && _videoPlayer!.value.isInitialized
-              ? ClipRRect(
-                  borderRadius: BorderRadius.circular(16),
-                  child: AspectRatio(
-                    aspectRatio: _videoPlayer!.value.aspectRatio,
-                    child: VideoPlayer(_videoPlayer!),
-                  ),
-                )
+              ? VideoPlayer(_videoPlayer!)
               : const Center(
                   child: CircularProgressIndicator(),
                 ),
@@ -1038,13 +1225,16 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
     required Widget mediaWidget,
     required bool showUrlBar,
   }) {
+    final sourceBar = showUrlBar ? _urlBar() : _fileInfoBar();
+    final ratio = _mediaAspectRatio <= 0 ? 16 / 9 : _mediaAspectRatio;
+
     return Scaffold(
-      backgroundColor: LoopiColors.canvas,
+      backgroundColor: LoopiColors.pageBackground(context),
       appBar: widget.embedded || !Navigator.of(context).canPop()
           ? null
           : AppBar(
               backgroundColor: Colors.transparent,
-              foregroundColor: LoopiColors.ink,
+              foregroundColor: LoopiColors.text(context),
               elevation: 0,
               title: const AppLogo(height: 30),
               leading: IconButton(
@@ -1059,28 +1249,25 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
       body: Column(
         children: [
           Expanded(
-            child: ListView(
-              padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
-              children: [
-                if (showUrlBar) _urlBar() else _fileInfoBar(),
-                const SizedBox(height: 12),
-                ClipRRect(
-                  borderRadius: BorderRadius.circular(16),
-                  child: AspectRatio(
-                    aspectRatio: 16 / 9,
-                    child: ColoredBox(
-                    color: Colors.black,
-                    child: mediaWidget,
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 16),
-                _sectionChips(),
-                const SizedBox(height: 8),
-                _timeline(),
-                const SizedBox(height: 16),
-                _routineTable(testing),
-              ],
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                final sideBySide = !_videoFitsInColumn(constraints, ratio);
+                if (sideBySide) {
+                  return _buildSideBySideBody(
+                    constraints: constraints,
+                    sourceBar: sourceBar,
+                    mediaWidget: mediaWidget,
+                    ratio: ratio,
+                    testing: testing,
+                  );
+                }
+                return _buildStackedBody(
+                  sourceBar: sourceBar,
+                  mediaWidget: mediaWidget,
+                  ratio: ratio,
+                  testing: testing,
+                );
+              },
             ),
           ),
           _bottomBar(testing),
@@ -1089,9 +1276,142 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
     );
   }
 
+  Widget _buildStackedBody({
+    required Widget sourceBar,
+    required Widget mediaWidget,
+    required double ratio,
+    required bool testing,
+  }) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(_kStudioHPad, _kStudioVPad, _kStudioHPad, _kStudioVPad),
+      child: Column(
+        children: [
+          sourceBar,
+          const SizedBox(height: _kStudioUrlGap),
+          AspectRatio(
+            aspectRatio: ratio,
+            child: _mediaSurface(mediaWidget),
+          ),
+          const SizedBox(height: 12),
+          Expanded(
+            child: _intervalControlsScroll(testing: testing, compact: false),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSideBySideBody({
+    required BoxConstraints constraints,
+    required Widget sourceBar,
+    required Widget mediaWidget,
+    required double ratio,
+    required bool testing,
+  }) {
+    final innerH = (constraints.maxHeight - _kStudioVPad * 2).clamp(1.0, constraints.maxHeight);
+    final innerW = (constraints.maxWidth - _kStudioHPad * 2).clamp(1.0, constraints.maxWidth);
+    var videoWidth = innerH * ratio;
+    final maxVideoWidth =
+        (innerW - _kStudioColumnGap - _kStudioMinSettingsWidth).clamp(80.0, innerW);
+    if (videoWidth > maxVideoWidth) videoWidth = maxVideoWidth;
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(_kStudioHPad, _kStudioVPad, _kStudioHPad, _kStudioVPad),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          SizedBox(
+            width: videoWidth,
+            child: _fittedMedia(mediaWidget, ratio),
+          ),
+          const SizedBox(width: _kStudioColumnGap),
+          Expanded(
+            child: Column(
+              children: [
+                sourceBar,
+                const SizedBox(height: 8),
+                Expanded(
+                  child: _intervalControlsScroll(testing: testing, compact: true),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _mediaSurface(Widget mediaWidget) {
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(16),
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          ColoredBox(
+            color: Colors.black,
+            child: Transform.flip(
+              flipX: _isMirrored ?? false,
+              child: mediaWidget,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _fittedMedia(Widget mediaWidget, double ratio) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        if (!constraints.maxHeight.isFinite || !constraints.maxWidth.isFinite) {
+          return AspectRatio(
+            aspectRatio: ratio,
+            child: _mediaSurface(mediaWidget),
+          );
+        }
+        var width = constraints.maxWidth;
+        var height = width / ratio;
+        if (height > constraints.maxHeight) {
+          height = constraints.maxHeight;
+          width = height * ratio;
+        }
+        return Center(
+          child: SizedBox(
+            width: width,
+            height: height,
+            child: _mediaSurface(mediaWidget),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _intervalControlsScroll({required bool testing, required bool compact}) {
+    return ScrollConfiguration(
+      behavior: const _MouseDragScrollBehavior(),
+      child: ListView(
+        controller: _routineListVerticalController,
+        primary: false,
+        children: [_intervalControls(testing, compact: compact)],
+      ),
+    );
+  }
+
+  Widget _intervalControls(bool testing, {required bool compact}) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        _sectionChips(),
+        SizedBox(height: compact ? 4 : 8),
+        _timeline(compact: compact),
+        SizedBox(height: compact ? 8 : 16),
+        _routineTable(testing, compact: compact),
+      ],
+    );
+  }
+
   Widget _urlBar() {
     return Material(
-      color: Colors.white,
+      color: LoopiColors.card(context),
       borderRadius: BorderRadius.circular(14),
       child: Padding(
         padding: const EdgeInsets.fromLTRB(12, 8, 8, 8),
@@ -1140,7 +1460,7 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
 
   Widget _fileInfoBar() {
     return Material(
-      color: Colors.white,
+      color: LoopiColors.card(context),
       borderRadius: BorderRadius.circular(14),
       child: Padding(
         padding: const EdgeInsets.fromLTRB(12, 8, 8, 8),
@@ -1259,6 +1579,7 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
   Widget _sectionChips() {
     return SingleChildScrollView(
       scrollDirection: Axis.horizontal,
+      primary: false,
       child: Row(
         children: [
           for (var i = 0; i < _session.segments.length; i++) ...[
@@ -1268,6 +1589,7 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
                 builder: (context) {
                   final testing = _session.isTesting;
                   final active = testing ? i == _highlightedSection : i == _session.selectedIndex;
+                  final highlight = _session.segments[i].isHighlight;
                   return Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
@@ -1279,12 +1601,14 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
                             ? LoopiColors.deepPurple
                             : LoopiColors.purple.withValues(alpha: 0.18),
                         labelStyle: TextStyle(
-                          color: testing && active
-                              ? Colors.white
-                              : active
-                                  ? LoopiColors.purpleDark
-                                  : LoopiColors.ink,
-                          fontWeight: FontWeight.w700,
+                          color: highlight
+                              ? kHighlightPink
+                              : testing && active
+                                  ? Colors.white
+                                  : active
+                                      ? LoopiColors.purple
+                                      : LoopiColors.text(context),
+                          fontWeight: highlight ? FontWeight.w800 : FontWeight.w700,
                         ),
                         onSelected: testing ? null : (_) => _selectRow(i),
                       ),
@@ -1307,27 +1631,29 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
     );
   }
 
-  Widget _timeline() {
+  Widget _timeline({bool compact = false}) {
     final range = _session.activeRange;
     final max = _session.videoDuration <= 0 ? 1.0 : _session.videoDuration;
     return Material(
-      color: Colors.white,
+      color: LoopiColors.card(context),
       borderRadius: BorderRadius.circular(16),
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(16, 14, 16, 8),
+        padding: compact
+            ? const EdgeInsets.fromLTRB(8, 8, 8, 4)
+            : const EdgeInsets.fromLTRB(16, 14, 16, 8),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
               'studio.timeline'.tr(),
-              style: const TextStyle(fontWeight: FontWeight.w700, color: LoopiColors.ink),
+              style: TextStyle(fontWeight: FontWeight.w700, color: LoopiColors.text(context)),
             ),
             const SizedBox(height: 4),
             Row(
               children: [
-                Text('${'studio.start'.tr()} ${formatMmSs(range.start)}', style: const TextStyle(color: LoopiColors.muted, fontSize: 12)),
+                Text('${'studio.start'.tr()} ${formatMmSs(range.start)}', style: TextStyle(color: LoopiColors.textMuted(context), fontSize: 12)),
                 const Spacer(),
-                Text('${'studio.end'.tr()} ${formatMmSs(range.end)}', style: const TextStyle(color: LoopiColors.muted, fontSize: 12)),
+                Text('${'studio.end'.tr()} ${formatMmSs(range.end)}', style: TextStyle(color: LoopiColors.textMuted(context), fontSize: 12)),
               ],
             ),
             RangeSlider(
@@ -1349,12 +1675,35 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
     );
   }
 
-  Widget _routineTable(bool testing) {
+  Widget _mirrorToggleButton() {
+    return Padding(
+      padding: const EdgeInsets.only(right: 4),
+      child: IconButton(
+        tooltip: '미러 모드 (좌우 반전)',
+        onPressed: () {
+          setState(() {
+            _isMirrored = !(_isMirrored ?? false);
+          });
+        },
+        isSelected: _isMirrored ?? false,
+        style: IconButton.styleFrom(
+          backgroundColor: (_isMirrored ?? false) ? LoopiColors.purple.withValues(alpha: 0.22) : Colors.transparent,
+          foregroundColor: (_isMirrored ?? false) ? LoopiColors.purple : LoopiColors.muted,
+        ),
+        icon: const Icon(Icons.flip_outlined),
+        selectedIcon: const Icon(Icons.flip),
+      ),
+    );
+  }
+
+  Widget _routineTable(bool testing, {required bool compact}) {
     return Material(
-      color: Colors.white,
+      color: LoopiColors.card(context),
       borderRadius: BorderRadius.circular(16),
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(12, 12, 12, 8),
+        padding: compact
+            ? const EdgeInsets.fromLTRB(6, 6, 6, 4)
+            : const EdgeInsets.fromLTRB(12, 12, 12, 8),
         child: Column(
           children: [
             Row(
@@ -1365,6 +1714,7 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
                     style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 16),
                   ),
                 ),
+                if (_session.sourceType != SourceType.audio) _mirrorToggleButton(),
                 IconButton.filled(
                   onPressed: testing ? null : _session.addSegment,
                   style: IconButton.styleFrom(backgroundColor: LoopiColors.deepPurple),
@@ -1373,18 +1723,16 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
                 ),
               ],
             ),
-            const SizedBox(height: 8),
-            SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
-              child: ConstrainedBox(
-                constraints: BoxConstraints(
-                  minWidth: MediaQuery.sizeOf(context).width - 56,
-                ),
-                child: DataTable(
+            SizedBox(height: compact ? 4 : 8),
+            LayoutBuilder(
+              builder: (context, tableConstraints) {
+                final table = DataTable(
                   showCheckboxColumn: false,
-                  headingRowHeight: 36,
-                  dataRowMinHeight: 56,
-                  dataRowMaxHeight: 64,
+                  columnSpacing: compact ? 8 : 16,
+                  horizontalMargin: compact ? 4 : 8,
+                  headingRowHeight: compact ? 28 : 36,
+                  dataRowMinHeight: compact ? 40 : 52,
+                  dataRowMaxHeight: compact ? 48 : 64,
                   headingTextStyle: const TextStyle(
                     fontSize: 12,
                     fontWeight: FontWeight.w700,
@@ -1400,10 +1748,43 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
                     const DataColumn(label: Text('')),
                   ],
                   rows: [
-                    for (var i = 0; i < _session.segments.length; i++) _buildRow(i, testing),
+                    for (var i = 0; i < _session.segments.length; i++)
+                      _buildRow(i, testing, compact: compact),
                   ],
-                ),
-              ),
+                );
+                return ScrollConfiguration(
+                  behavior: const _MouseDragScrollBehavior(),
+                  child: Scrollbar(
+                    controller: _routineListHorizontalController,
+                    thumbVisibility: true,
+                    child: Listener(
+                      onPointerSignal: (event) {
+                        if (event is! PointerScrollEvent) return;
+                        if (!_routineListHorizontalController.hasClients) return;
+                        final delta = event.scrollDelta.dy.abs() >= event.scrollDelta.dx.abs()
+                            ? event.scrollDelta.dy
+                            : event.scrollDelta.dx;
+                        final next = _routineListHorizontalController.offset + delta;
+                        _routineListHorizontalController.jumpTo(
+                          next.clamp(
+                            0.0,
+                            _routineListHorizontalController.position.maxScrollExtent,
+                          ),
+                        );
+                      },
+                      child: SingleChildScrollView(
+                        controller: _routineListHorizontalController,
+                        scrollDirection: Axis.horizontal,
+                        primary: false,
+                        child: ConstrainedBox(
+                          constraints: BoxConstraints(minWidth: tableConstraints.maxWidth),
+                          child: table,
+                        ),
+                      ),
+                    ),
+                  ),
+                );
+              },
             ),
           ],
         ),
@@ -1411,7 +1792,7 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
     );
   }
 
-  DataRow _buildRow(int index, bool testing) {
+  DataRow _buildRow(int index, bool testing, {required bool compact}) {
     final selected = index == _session.selectedIndex;
     return DataRow(
       selected: selected,
@@ -1420,73 +1801,39 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
       ),
       onSelectChanged: testing ? null : (_) => _selectRow(index),
       cells: [
-        DataCell(Text(sectionLabelForIndex(index), style: const TextStyle(fontWeight: FontWeight.w700))),
-        DataCell(_timeField(index: index, isStart: true, enabled: !testing)),
-        DataCell(_timeField(index: index, isStart: false, enabled: !testing)),
         DataCell(
-          DropdownButtonHideUnderline(
-            child: DropdownButton<double>(
-              value: _session.segments[index].speed,
-              isDense: true,
-              onChanged: testing
-                  ? null
-                  : (value) {
-                      if (value == null) return;
-                      _session.selectSegment(index);
-                      _session.setSpeed(index, value);
-                      _applySpeed(value);
-                    },
-              items: [
-                for (final speed in kPlaybackSpeeds)
-                  DropdownMenuItem(value: speed, child: Text(formatSpeedLabel(speed))),
-              ],
+          _scaleDownCell(
+            compact: true,
+            child: Tooltip(
+              message: 'studio.set_highlight'.tr(),
+              child: InkWell(
+                onTap: testing ? null : () => _session.toggleHighlight(index),
+                borderRadius: BorderRadius.circular(4),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+                  child: Text(
+                    sectionLabelForIndex(index),
+                    style: TextStyle(
+                      fontWeight: _session.segments[index].isHighlight
+                          ? FontWeight.w800
+                          : FontWeight.w500,
+                      color: _session.segments[index].isHighlight ? kHighlightPink : null,
+                    ),
+                  ),
+                ),
+              ),
             ),
           ),
         ),
-        DataCell(
-          DropdownButtonHideUnderline(
-            child: DropdownButton<int>(
-              value: _session.segments[index].loopCount,
-              isDense: true,
-              onChanged: testing
-                  ? null
-                  : (value) {
-                      if (value == null) return;
-                      _session.selectSegment(index);
-                      _session.setLoopCount(index, value);
-                    },
-              items: [
-                for (var n = 1; n <= 10; n++)
-                  DropdownMenuItem(value: n, child: Text('${n}x')),
-                const DropdownMenuItem(value: kInfiniteLoop, child: Text('Infinite')),
-              ],
-            ),
-          ),
-        ),
-        DataCell(
-          DropdownButtonHideUnderline(
-            child: DropdownButton<int>(
-              value: kDelaySeconds.contains(_session.segments[index].delaySec)
-                  ? _session.segments[index].delaySec
-                  : kDelaySeconds.first,
-              isDense: true,
-              onChanged: testing
-                  ? null
-                  : (value) {
-                      if (value == null) return;
-                      _session.selectSegment(index);
-                      _session.setDelaySec(index, value);
-                    },
-              items: [
-                for (final delay in kDelaySeconds)
-                  DropdownMenuItem(value: delay, child: Text(formatDelayLabel(delay))),
-              ],
-            ),
-          ),
-        ),
+        DataCell(_scaleDownCell(compact: true, child: _timeField(index: index, isStart: true, enabled: !testing, compact: compact))),
+        DataCell(_scaleDownCell(compact: true, child: _timeField(index: index, isStart: false, enabled: !testing, compact: compact))),
+        DataCell(_scaleDownCell(compact: true, child: _speedDropdown(index, testing))),
+        DataCell(_scaleDownCell(compact: true, child: _loopDropdown(index, testing))),
+        DataCell(_scaleDownCell(compact: true, child: _delayDropdown(index, testing))),
         DataCell(
           IconButton(
             tooltip: 'Delete section',
+            visualDensity: compact ? VisualDensity.compact : VisualDensity.standard,
             onPressed: testing || index == 0 || _session.segments.length <= 1
                 ? null
                 : () => _session.removeSegment(index),
@@ -1497,23 +1844,92 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
     );
   }
 
+  Widget _scaleDownCell({required bool compact, required Widget child}) {
+    return FittedBox(fit: BoxFit.scaleDown, alignment: Alignment.centerLeft, child: child);
+  }
+
+  Widget _speedDropdown(int index, bool testing) {
+    return DropdownButtonHideUnderline(
+      child: DropdownButton<double>(
+        value: _session.segments[index].speed,
+        isDense: true,
+        onChanged: testing
+            ? null
+            : (value) {
+                if (value == null) return;
+                _session.selectSegment(index);
+                _session.setSpeed(index, value);
+                _applySpeed(value);
+              },
+        items: [
+          for (final speed in kPlaybackSpeeds)
+            DropdownMenuItem(value: speed, child: Text(formatSpeedLabel(speed))),
+        ],
+      ),
+    );
+  }
+
+  Widget _loopDropdown(int index, bool testing) {
+    return DropdownButtonHideUnderline(
+      child: DropdownButton<int>(
+        value: _session.segments[index].loopCount,
+        isDense: true,
+        onChanged: testing
+            ? null
+            : (value) {
+                if (value == null) return;
+                _session.selectSegment(index);
+                _session.setLoopCount(index, value);
+              },
+        items: [
+          for (var n = 1; n <= 10; n++)
+            DropdownMenuItem(value: n, child: Text('${n}x')),
+          const DropdownMenuItem(value: kInfiniteLoop, child: Text('Infinite')),
+        ],
+      ),
+    );
+  }
+
+  Widget _delayDropdown(int index, bool testing) {
+    return DropdownButtonHideUnderline(
+      child: DropdownButton<int>(
+        value: kDelaySeconds.contains(_session.segments[index].delaySec)
+            ? _session.segments[index].delaySec
+            : kDelaySeconds.first,
+        isDense: true,
+        onChanged: testing
+            ? null
+            : (value) {
+                if (value == null) return;
+                _session.selectSegment(index);
+                _session.setDelaySec(index, value);
+              },
+        items: [
+          for (final delay in kDelaySeconds)
+            DropdownMenuItem(value: delay, child: Text(formatDelayLabel(delay))),
+        ],
+      ),
+    );
+  }
+
   Widget _timeField({
     required int index,
     required bool isStart,
     required bool enabled,
+    bool compact = false,
   }) {
     return SizedBox(
-      width: 72,
+      width: compact ? 56 : 72,
       child: TextField(
         controller: isStart ? _startControllers[index] : _endControllers[index],
         focusNode: isStart ? _startFocus[index] : _endFocus[index],
         enabled: enabled,
         textAlign: TextAlign.center,
-        style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
-        decoration: const InputDecoration(
+        style: TextStyle(fontSize: compact ? 12 : 13, fontWeight: FontWeight.w600),
+        decoration: InputDecoration(
           isDense: true,
-          border: OutlineInputBorder(),
-          contentPadding: EdgeInsets.symmetric(horizontal: 6, vertical: 8),
+          border: const OutlineInputBorder(),
+          contentPadding: EdgeInsets.symmetric(horizontal: compact ? 3 : 6, vertical: compact ? 4 : 8),
         ),
         onTap: () {
           if (!enabled) return;
@@ -1528,7 +1944,7 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
 
   Widget _bottomBar(bool testing) {
     return Material(
-      color: Colors.white,
+      color: LoopiColors.card(context),
       elevation: 8,
       child: SafeArea(
         top: false,
@@ -1566,5 +1982,31 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
         ),
       ),
     );
+  }
+}
+
+class _MouseDragScrollBehavior extends MaterialScrollBehavior {
+  const _MouseDragScrollBehavior();
+
+  @override
+  Set<PointerDeviceKind> get dragDevices => {
+        PointerDeviceKind.touch,
+        PointerDeviceKind.mouse,
+        PointerDeviceKind.trackpad,
+        PointerDeviceKind.stylus,
+      };
+
+  /// Flutter web throws `TypeError: Null is not a subtype of ScrollController`
+  /// when [MaterialScrollBehavior] injects a [Scrollbar] with a null controller.
+  @override
+  Widget buildScrollbar(BuildContext context, Widget child, ScrollableDetails details) {
+    final controller = details.controller;
+    if (controller == null) return child;
+    switch (axisDirectionToAxis(details.direction)) {
+      case Axis.horizontal:
+        return child;
+      case Axis.vertical:
+        return Scrollbar(controller: controller, child: child);
+    }
   }
 }

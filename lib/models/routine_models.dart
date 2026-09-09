@@ -2,6 +2,8 @@ import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 
+import 'routine_category.dart';
+
 enum SourceType {
   youtube,
   localVideo,
@@ -17,8 +19,7 @@ const List<int> kDelaySeconds = [0, 1, 2, 3, 5, 10, 30, 60];
 const int kInfiniteLoop = -1;
 
 String sectionLabelForIndex(int index) {
-  final letter = String.fromCharCode(65 + (index % 26));
-  return "$letter-$letter'";
+  return String.fromCharCode(65 + (index % 26));
 }
 
 String formatSpeedLabel(double speed) => '${speed.toStringAsFixed(1)}x';
@@ -44,6 +45,7 @@ class RoutineSegment {
     this.speed = 1.0,
     this.loopCount = 1,
     this.delaySec = 0,
+    this.isHighlight = false,
   });
 
   final String id;
@@ -52,6 +54,7 @@ class RoutineSegment {
   final double speed;
   final int loopCount;
   final int delaySec;
+  final bool isHighlight;
 
   factory RoutineSegment.fromJson(Map<String, dynamic> json) {
     return RoutineSegment(
@@ -61,6 +64,7 @@ class RoutineSegment {
       speed: (json['speed'] as num?)?.toDouble() ?? 1.0,
       loopCount: (json['loopCount'] as num?)?.toInt() ?? 1,
       delaySec: (json['delaySec'] as num?)?.toInt() ?? 0,
+      isHighlight: json['isHighlight'] == true,
     );
   }
 
@@ -71,6 +75,7 @@ class RoutineSegment {
         'speed': speed,
         'loopCount': loopCount,
         'delaySec': delaySec,
+        'isHighlight': isHighlight,
       };
 
   RoutineSegment copyWith({
@@ -80,6 +85,7 @@ class RoutineSegment {
     double? speed,
     int? loopCount,
     int? delaySec,
+    bool? isHighlight,
   }) {
     return RoutineSegment(
       id: id ?? this.id,
@@ -88,6 +94,7 @@ class RoutineSegment {
       speed: speed ?? this.speed,
       loopCount: loopCount ?? this.loopCount,
       delaySec: delaySec ?? this.delaySec,
+      isHighlight: isHighlight ?? this.isHighlight,
     );
   }
 }
@@ -108,6 +115,8 @@ class SavedRoutine {
     this.isFavorite = false,
     this.authorId = 'me',
     this.authorName = '나',
+    this.category = RoutineCategory.dance,
+    this.isMirrored = false,
   });
 
   final String id;
@@ -123,18 +132,41 @@ class SavedRoutine {
   final bool isFavorite;
   final String authorId;
   final String authorName;
+  final String category;
+  final bool? isMirrored;
+
+  bool get isMirroredOn => isMirrored ?? false;
+
+  bool get hasHighlight => segments.any((segment) => segment.isHighlight);
+
+  int? get highlightIndex {
+    final index = segments.indexWhere((segment) => segment.isHighlight);
+    return index < 0 ? null : index;
+  }
 
   factory SavedRoutine.fromJson(Map<String, dynamic> json) {
+    DateTime parseCreatedAt(Object? raw) {
+      if (raw is DateTime) return raw;
+      if (raw is String) return DateTime.tryParse(raw) ?? DateTime.now();
+      try {
+        final dynamic value = raw;
+        final maybe = value?.toDate?.call();
+        if (maybe is DateTime) return maybe;
+      } catch (_) {}
+      return DateTime.now();
+    }
+
     return SavedRoutine(
-      id: json['id'] as String? ?? 'rtn_${DateTime.now().microsecondsSinceEpoch}',
+      id: json['id']?.toString() ?? 'rtn_${DateTime.now().microsecondsSinceEpoch}',
       name: json['name'] as String? ?? 'Untitled Routine',
       videoUrl: json['videoUrl'] as String? ?? '',
       videoId: json['videoId'] as String? ?? '',
       segments: (json['segments'] as List<dynamic>? ?? const [])
-          .map((segment) => RoutineSegment.fromJson(segment as Map<String, dynamic>))
+          .whereType<Map>()
+          .map((segment) => RoutineSegment.fromJson(Map<String, dynamic>.from(segment)))
           .toList(),
-      createdAt: DateTime.tryParse(json['createdAt'] as String? ?? '') ?? DateTime.now(),
-      sourceType: json['sourceType'] != null 
+      createdAt: parseCreatedAt(json['createdAt']),
+      sourceType: json['sourceType'] != null
           ? SourceType.values.firstWhere(
               (e) => e.name == json['sourceType'] as String,
               orElse: () => SourceType.youtube,
@@ -142,12 +174,14 @@ class SavedRoutine {
           : SourceType.youtube,
       localFilePath: json['localFilePath'] as String?,
       fileName: json['fileName'] as String?,
-        localDataBytes: json['localDataBytes'] is String
+      localDataBytes: json['localDataBytes'] is String
           ? base64Decode(json['localDataBytes'] as String)
           : null,
-          isFavorite: json['isFavorite'] as bool? ?? false,
-          authorId: json['authorId'] as String? ?? 'me',
-          authorName: json['authorName'] as String? ?? '나',
+      isFavorite: json['isFavorite'] as bool? ?? false,
+      authorId: json['authorId']?.toString() ?? 'me',
+      authorName: json['authorName'] as String? ?? '나',
+      category: RoutineCategory.normalize(json['category'] as String?),
+      isMirrored: json['isMirrored'] as bool? ?? false,
     );
   }
 
@@ -165,12 +199,23 @@ class SavedRoutine {
         'isFavorite': isFavorite,
         'authorId': authorId,
         'authorName': authorName,
+        'category': RoutineCategory.normalize(category),
+        'isMirrored': isMirrored ?? false,
       };
+
+  /// Firestore payload without large local media bytes.
+  Map<String, dynamic> toFirestoreJson() {
+    final json = toJson();
+    json.remove('localDataBytes');
+    return json;
+  }
 
   SavedRoutine copyWith({
     bool? isFavorite,
     String? authorId,
     String? authorName,
+    String? category,
+    bool? isMirrored,
   }) {
     return SavedRoutine(
       id: id,
@@ -186,8 +231,52 @@ class SavedRoutine {
       isFavorite: isFavorite ?? this.isFavorite,
       authorId: authorId ?? this.authorId,
       authorName: authorName ?? this.authorName,
+      category: RoutineCategory.normalize(category ?? this.category),
+      isMirrored: isMirrored ?? this.isMirrored ?? false,
     );
   }
+}
+
+@immutable
+class PracticeIntervalMarker {
+  const PracticeIntervalMarker({
+    required this.intervalId,
+    required this.startOffsetMillis,
+    required this.endOffsetMillis,
+    this.segmentIndex = 0,
+  });
+
+  final String intervalId;
+  final int startOffsetMillis;
+  final int endOffsetMillis;
+  final int segmentIndex;
+
+  factory PracticeIntervalMarker.fromJson(Map<String, dynamic> json) {
+    return PracticeIntervalMarker(
+      intervalId: json['intervalId'] as String? ?? '',
+      startOffsetMillis: (json['startOffsetMillis'] as num?)?.toInt() ?? 0,
+      endOffsetMillis: (json['endOffsetMillis'] as num?)?.toInt() ?? 0,
+      segmentIndex: (json['segmentIndex'] as num?)?.toInt() ?? 0,
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+        'intervalId': intervalId,
+        'startOffsetMillis': startOffsetMillis,
+        'endOffsetMillis': endOffsetMillis,
+        'segmentIndex': segmentIndex,
+      };
+}
+
+bool _pathLooksLikeAudio(String? path) {
+  if (path == null || path.isEmpty) return false;
+  final lower = path.toLowerCase();
+  return lower.endsWith('.m4a') ||
+      lower.endsWith('.aac') ||
+      lower.endsWith('.mp3') ||
+      lower.endsWith('.wav') ||
+      lower.endsWith('.ogg') ||
+      lower.endsWith('.flac');
 }
 
 @immutable
@@ -202,6 +291,9 @@ class PracticeResult {
     this.startTime = 0,
     this.endTime = 0,
     this.playbackRate = 1.0,
+    this.category = RoutineCategory.dance,
+    this.intervalMarkers = const [],
+    this.isAudioRecording = false,
   });
 
   final String id;
@@ -213,8 +305,12 @@ class PracticeResult {
   final double startTime;
   final double endTime;
   final double playbackRate;
+  final String category;
+  final List<PracticeIntervalMarker> intervalMarkers;
+  final bool isAudioRecording;
 
   factory PracticeResult.fromJson(Map<String, dynamic> json) {
+    final rawMarkers = json['intervalMarkers'];
     return PracticeResult(
       id: json['id'] as String? ?? 'practice_${DateTime.now().microsecondsSinceEpoch}',
       name: json['name'] as String? ?? 'Practice Result',
@@ -227,6 +323,14 @@ class PracticeResult {
       startTime: (json['startTime'] as num?)?.toDouble() ?? 0,
       endTime: (json['endTime'] as num?)?.toDouble() ?? 0,
       playbackRate: (json['playbackRate'] as num?)?.toDouble() ?? 1.0,
+      category: RoutineCategory.normalize(json['category'] as String?),
+      intervalMarkers: rawMarkers is List
+          ? rawMarkers
+              .whereType<Map>()
+              .map((item) => PracticeIntervalMarker.fromJson(Map<String, dynamic>.from(item)))
+              .toList()
+          : const [],
+      isAudioRecording: json['isAudioRecording'] == true || _pathLooksLikeAudio(json['recordedPath'] as String?),
     );
   }
 
@@ -240,7 +344,24 @@ class PracticeResult {
         'startTime': startTime,
         'endTime': endTime,
         'playbackRate': playbackRate,
+        'category': RoutineCategory.normalize(category),
+        'intervalMarkers': intervalMarkers.map((marker) => marker.toJson()).toList(),
+        'isAudioRecording': isAudioRecording,
       };
+
+  Map<String, dynamic> toFirestoreJson() {
+    final json = toJson();
+    json.remove('recordedDataBytes');
+    json.remove('recordedPath');
+    return json;
+  }
+
+  /// Session-safe local metadata. Never persist video bytes in SharedPreferences.
+  Map<String, dynamic> toLocalJson() {
+    final json = toJson();
+    json.remove('recordedDataBytes');
+    return json;
+  }
 }
 
 @immutable

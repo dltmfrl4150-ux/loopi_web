@@ -1,8 +1,11 @@
+import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:easy_localization/easy_localization.dart';
 
-import 'screens/social_login_screen.dart';
+import 'firebase_options.dart';
+import 'screens/auth_gate.dart';
+import 'services/auth_service.dart';
 import 'state/routine_library.dart';
 import 'state/user_state.dart';
 import 'theme/loopi_colors.dart';
@@ -10,6 +13,13 @@ import 'theme/loopi_colors.dart';
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await EasyLocalization.ensureInitialized();
+  try {
+    await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
+    FirebaseBootstrap.initialized = true;
+  } catch (error) {
+    debugPrint('Firebase initialization skipped: $error');
+    FirebaseBootstrap.initialized = false;
+  }
   runApp(
     EasyLocalization(
       supportedLocales: const [Locale('en'), Locale('ko')],
@@ -31,6 +41,12 @@ class LoopiApp extends StatefulWidget {
 class _LoopiAppState extends State<LoopiApp> {
   final RoutineLibrary _library = RoutineLibrary();
   final UserSubscriptionState _userState = UserSubscriptionState();
+
+  @override
+  void initState() {
+    super.initState();
+    _library.load();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -60,9 +76,11 @@ class _LoopiAppState extends State<LoopiApp> {
           brightness: Brightness.dark,
         ),
         useMaterial3: true,
+        scaffoldBackgroundColor: LoopiColors.darkCanvas,
+        canvasColor: LoopiColors.darkCanvas,
       ),
       themeMode: ThemeMode.system,
-      home: SocialLoginScreen(library: _library, userState: _userState),
+      home: AuthGate(library: _library, userState: _userState),
     );
   }
 }
