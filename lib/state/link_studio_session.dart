@@ -54,14 +54,65 @@ class LinkStudioSession extends ChangeNotifier {
     if ((duration - _videoDuration).abs() < 0.05) return;
     _videoDuration = duration;
 
-    // Update first segment's endSec if it's still at default value (30.0)
-    if (_segments.isNotEmpty && _segments[0].endSec == 30.0) {
+    // Only expand the default first-segment end when there is a single section.
+    // Multi-section routines must keep author-set windows (do not stretch A→full).
+    if (_segments.length == 1 && (_segments[0].endSec - 30.0).abs() < 0.05) {
       _segments[0] = _segments[0].copyWith(endSec: duration);
     }
 
     for (var i = 0; i < _segments.length; i++) {
       _segments[i] = _clampSegment(_segments[i]);
     }
+    notifyListeners();
+  }
+
+  /// Replace sections with a single default window (fresh start).
+  void resetToDefaultSections({double? duration}) {
+    if (duration != null && duration > 0) {
+      _videoDuration = duration;
+    }
+    _segments
+      ..clear()
+      ..add(
+        RoutineSegment(
+          id: 'seg_0',
+          startSec: 0,
+          endSec: _defaultEnd(_videoDuration),
+        ),
+      );
+    _selectedIndex = 0;
+    _idSeed = 1;
+    notifyListeners();
+  }
+
+  /// Apply cached practice sections (e.g. from `cached_videos`).
+  void applyCachedSections(List<RoutineSegment> sections, {double? duration}) {
+    if (duration != null && duration > 0) {
+      _videoDuration = duration;
+    }
+    if (sections.isEmpty) {
+      resetToDefaultSections(duration: duration);
+      return;
+    }
+    _segments
+      ..clear()
+      ..addAll(
+        sections.map(
+          (s) => _clampSegment(
+            RoutineSegment(
+              id: s.id,
+              startSec: s.startSec,
+              endSec: s.endSec,
+              speed: s.speed,
+              loopCount: s.loopCount,
+              delaySec: s.delaySec,
+              isHighlight: s.isHighlight,
+            ),
+          ),
+        ),
+      );
+    _selectedIndex = 0;
+    _idSeed = _segments.length + 1;
     notifyListeners();
   }
 
@@ -86,11 +137,21 @@ class LinkStudioSession extends ChangeNotifier {
 
   void addSegment() {
     final last = _segments.last;
+    final span = (last.endSec - last.startSec).clamp(minGap, _videoDuration);
+    var start = last.endSec;
+    if (start + minGap > _videoDuration) {
+      start = (_videoDuration - span).clamp(0.0, _videoDuration);
+    }
+    var end = (start + span).clamp(0.0, _videoDuration);
+    if (end - start < minGap) {
+      end = _videoDuration;
+      start = (end - minGap).clamp(0.0, _videoDuration);
+    }
     _segments.add(
       RoutineSegment(
         id: 'seg_${_idSeed++}',
-        startSec: last.startSec,
-        endSec: last.endSec,
+        startSec: start,
+        endSec: end,
         speed: last.speed,
         loopCount: last.loopCount,
         delaySec: last.delaySec,
@@ -176,7 +237,8 @@ class LinkStudioSession extends ChangeNotifier {
   void beginTest({int startIndex = 0}) {
     isTesting = true;
     testSegmentIndex = startIndex.clamp(0, _segments.length - 1);
-    playsRemaining = _segments[testSegmentIndex].loopCount;
+    final count = _segments[testSegmentIndex].loopCount;
+    playsRemaining = count == kInfiniteLoop ? kInfiniteLoop : (count <= 0 ? 1 : count);
     notifyListeners();
   }
 
@@ -191,16 +253,21 @@ class LinkStudioSession extends ChangeNotifier {
 
   LoopHitResult onLoopHit() {
     final segment = _segments[testSegmentIndex];
-    if (segment.loopCount == kInfiniteLoop) {
+    final targetLoops = segment.loopCount == kInfiniteLoop
+        ? kInfiniteLoop
+        : (segment.loopCount <= 0 ? 1 : segment.loopCount);
+    if (targetLoops == kInfiniteLoop) {
       return LoopHitResult.seekToStart;
     }
+    // playsRemaining starts at targetLoops; each hit consumes one completed play.
     playsRemaining -= 1;
     if (playsRemaining > 0) {
       return LoopHitResult.seekToStart;
     }
     if (testSegmentIndex + 1 < _segments.length) {
       testSegmentIndex += 1;
-      playsRemaining = _segments[testSegmentIndex].loopCount;
+      final next = _segments[testSegmentIndex].loopCount;
+      playsRemaining = next == kInfiniteLoop ? kInfiniteLoop : (next <= 0 ? 1 : next);
       notifyListeners();
       return LoopHitResult.nextSegment;
     }

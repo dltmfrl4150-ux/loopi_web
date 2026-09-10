@@ -11,10 +11,8 @@
   "home": {
     "greeting": "좋은 하루예요,",
     "subtitle": "오늘도 리듬을 이어가볼까요?",
-    "weekly_stats": "주간 학습 스트릭",
-    "continuous_learning": "연속 학습",
-    "this_week": "이번 주",
-    "saved_routines": "저장 루틴",
+    "announcement_fallback": "LOOPI에 오신 걸 환영해요! 미러·루프 기능을 확인해 보세요 🔁",
+    "announcement_semantics": "공지",
     "quick_action": "새 루틴 만들기",
     "quick_action_subtitle": "유튜브 링크 등록",
     "recent_routines": "최근 연습한 루틴",

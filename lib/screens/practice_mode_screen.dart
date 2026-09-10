@@ -58,13 +58,14 @@ class PracticeModeScreenState extends State<PracticeModeScreen> {
   int _countdown = 3;
   bool _ready = false;
   int _segmentIndex = 0;
-  int _playsRemaining = 1;
   int _playlistIndex = 0;
   DateTime? _ignoreUntil;
   bool _delayPending = false;
   bool _isPlaying = false;
   bool _playPauseBusy = false;
   bool _isSeeking = false;
+  bool _segmentFinished = false;
+  int _loopsCompleted = 0;
   // Guards segment/routine transitions so a burst of position callbacks can't
   // re-enter the advance logic while a previous transition is still in flight.
   bool _isAdvancing = false;
@@ -112,7 +113,8 @@ class PracticeModeScreenState extends State<PracticeModeScreen> {
     _playlistIndex = _playlist.indexWhere((routine) => routine.id == widget.routine.id);
     if (_playlistIndex < 0) _playlistIndex = 0;
     _segmentIndex = 0;
-    _playsRemaining = _currentRoutine.segments.first.loopCount;
+    _loopsCompleted = 0;
+    _segmentFinished = false;
 
     _initializePlayer();
     
@@ -252,7 +254,8 @@ class PracticeModeScreenState extends State<PracticeModeScreen> {
     if (index < 0 || index >= _playlist.length) return;
     _playlistIndex = index;
     _segmentIndex = 0;
-    _playsRemaining = _currentRoutine.segments.first.loopCount;
+    _loopsCompleted = 0;
+    _segmentFinished = false;
     _ignoreUntil = DateTime.now().add(const Duration(milliseconds: 600));
     _isSeeking = true;
     _isAdvancing = false;
@@ -366,7 +369,8 @@ class PracticeModeScreenState extends State<PracticeModeScreen> {
   Future<void> _startSegment(int index) async {
     if (index < 0 || index >= _currentRoutine.segments.length) return;
     _segmentIndex = index;
-    _playsRemaining = _currentRoutine.segments[index].loopCount;
+    _loopsCompleted = 0;
+    _segmentFinished = false;
     _ignoreUntil = DateTime.now().add(const Duration(milliseconds: 500));
     _isSeeking = true;
     _isAdvancing = false;
@@ -545,11 +549,12 @@ class PracticeModeScreenState extends State<PracticeModeScreen> {
   // Detects end-of-segment: `time + 0.12 < segmentEnd` means "not there yet", so
   // this fires once `time >= segmentEnd - 0.12`, tolerant of ms/float rounding.
   void _onTime(double time) {
-    if (!_ready || _delayPending || _isSeeking || _isAdvancing) return;
+    if (!_ready || _delayPending || _isSeeking || _isAdvancing || _segmentFinished) return;
     if (_ignoreUntil != null && DateTime.now().isBefore(_ignoreUntil!)) return;
 
     final segmentStart = _segment.startSec;
     final segmentEnd = _segment.endSec;
+    if (segmentEnd <= segmentStart) return;
     if (time < segmentStart - 0.1) return;
     if (time + 0.12 < segmentEnd) return;
 
@@ -560,34 +565,35 @@ class PracticeModeScreenState extends State<PracticeModeScreen> {
   /// stops once everything is done. try/finally guarantees `_isAdvancing`
   /// always clears, even if an awaited player call throws.
   Future<void> _advancePastSegment() async {
-    if (_isAdvancing) return;
+    if (_isAdvancing || _segmentFinished) return;
     _isAdvancing = true;
     try {
       final delaySec = _segment.delaySec;
+      final targetLoops = _segment.loopCount == kInfiniteLoop
+          ? kInfiniteLoop
+          : (_segment.loopCount <= 0 ? 1 : _segment.loopCount);
 
-      // 1. 무한 반복 모드인 경우 현재 구간 무한 반복
-      if (_segment.loopCount == kInfiniteLoop) {
+      if (targetLoops == kInfiniteLoop) {
         await _replayWithDelay(delaySec);
         return;
       }
 
-      // 2. 지정된 반복 횟수가 남아있는 경우 현재 구간 재반복
-      if (_playsRemaining > 1) {
-        _playsRemaining--;
+      _loopsCompleted += 1;
+      if (_loopsCompleted < targetLoops) {
         await _replayWithDelay(delaySec);
         return;
       }
 
-      // 3. 반복 횟수를 다 채운 경우 다음 구간(B, C...)으로 전진!
+      // Strict termination: cancel further seeks once the target loop count is met.
       final nextIndex = _segmentIndex + 1;
       if (nextIndex < _currentRoutine.segments.length) {
         await _startSegment(nextIndex);
       } else {
-        // 마지막 구간까지 완료되면 재생을 정지합니다.
-        setState(() => _isPlaying = false);
-        unawaited(_yt(() => _youtubePlayer.pauseVideo()));
-        _videoPlayer?.pause();
-        _audioPlayer?.pause();
+        _segmentFinished = true;
+        _pollTimer?.cancel();
+        _pollTimer = null;
+        if (mounted) setState(() => _isPlaying = false);
+        await pausePlayback();
       }
     } finally {
       _isAdvancing = false;

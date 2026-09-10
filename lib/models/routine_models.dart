@@ -57,10 +57,14 @@ class RoutineSegment {
   final bool isHighlight;
 
   factory RoutineSegment.fromJson(Map<String, dynamic> json) {
+    final start = (json['startSec'] as num?)?.toDouble() ?? 0;
+    final endRaw = (json['endSec'] as num?)?.toDouble();
+    // Do not default missing ends to 30s — that invents unreachable Short boundaries.
+    final end = (endRaw != null && endRaw > start) ? endRaw : start;
     return RoutineSegment(
       id: json['id'] as String? ?? 'seg_${DateTime.now().microsecondsSinceEpoch}',
-      startSec: (json['startSec'] as num?)?.toDouble() ?? 0,
-      endSec: (json['endSec'] as num?)?.toDouble() ?? 30,
+      startSec: start,
+      endSec: end,
       speed: (json['speed'] as num?)?.toDouble() ?? 1.0,
       loopCount: (json['loopCount'] as num?)?.toInt() ?? 1,
       delaySec: (json['delaySec'] as num?)?.toInt() ?? 0,
@@ -311,23 +315,46 @@ class PracticeResult {
 
   factory PracticeResult.fromJson(Map<String, dynamic> json) {
     final rawMarkers = json['intervalMarkers'];
+    // Prefer explicit recorded* aliases when present (newer saves).
+    final start = (json['recordedStartTime'] as num?)?.toDouble() ??
+        (json['startTime'] as num?)?.toDouble() ??
+        0.0;
+    var end = (json['recordedEndTime'] as num?)?.toDouble() ??
+        (json['endTime'] as num?)?.toDouble() ??
+        0.0;
+    if (end < start) end = start;
     return PracticeResult(
       id: json['id'] as String? ?? 'practice_${DateTime.now().microsecondsSinceEpoch}',
-      name: json['name'] as String? ?? 'Practice Result',
+      name: (json['name'] as String?)?.trim().isNotEmpty == true
+          ? (json['name'] as String).trim()
+          : 'Practice Result',
       routineId: json['routineId'] as String? ?? '',
       createdAt: DateTime.tryParse(json['createdAt'] as String? ?? '') ?? DateTime.now(),
       recordedPath: json['recordedPath'] as String?,
       recordedDataBytes: json['recordedDataBytes'] is String
-          ? base64Decode(json['recordedDataBytes'] as String)
+          ? () {
+              try {
+                return base64Decode(json['recordedDataBytes'] as String);
+              } catch (_) {
+                return null;
+              }
+            }()
           : null,
-      startTime: (json['startTime'] as num?)?.toDouble() ?? 0,
-      endTime: (json['endTime'] as num?)?.toDouble() ?? 0,
-      playbackRate: (json['playbackRate'] as num?)?.toDouble() ?? 1.0,
+      startTime: start.isFinite ? start : 0.0,
+      endTime: end.isFinite ? end : 0.0,
+      playbackRate: ((json['playbackRate'] as num?)?.toDouble() ?? 1.0).clamp(0.25, 2.0).toDouble(),
       category: RoutineCategory.normalize(json['category'] as String?),
       intervalMarkers: rawMarkers is List
           ? rawMarkers
               .whereType<Map>()
-              .map((item) => PracticeIntervalMarker.fromJson(Map<String, dynamic>.from(item)))
+              .map((item) {
+                try {
+                  return PracticeIntervalMarker.fromJson(Map<String, dynamic>.from(item));
+                } catch (_) {
+                  return null;
+                }
+              })
+              .whereType<PracticeIntervalMarker>()
               .toList()
           : const [],
       isAudioRecording: json['isAudioRecording'] == true || _pathLooksLikeAudio(json['recordedPath'] as String?),
@@ -343,6 +370,9 @@ class PracticeResult {
         'recordedDataBytes': recordedDataBytes == null ? null : base64Encode(recordedDataBytes!),
         'startTime': startTime,
         'endTime': endTime,
+        // Explicit aliases so consumers never confuse with routine-global times.
+        'recordedStartTime': startTime,
+        'recordedEndTime': endTime,
         'playbackRate': playbackRate,
         'category': RoutineCategory.normalize(category),
         'intervalMarkers': intervalMarkers.map((marker) => marker.toJson()).toList(),

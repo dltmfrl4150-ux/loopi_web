@@ -4,6 +4,7 @@ import 'dart:developer' as developer;
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/foundation.dart';
 
+import '../models/cached_video.dart';
 import '../models/community_models.dart';
 import '../models/routine_category.dart';
 import '../models/routine_models.dart';
@@ -33,6 +34,56 @@ class RoutinesPage {
   final List<CommunityRoutinePost> posts;
   final bool hasMore;
   final DocumentSnapshot<Map<String, dynamic>>? cursor;
+}
+
+/// Latest home-screen notice from the `announcements` collection.
+class AppAnnouncement {
+  const AppAnnouncement({
+    required this.id,
+    required this.title,
+    this.link,
+  });
+
+  final String id;
+  final String title;
+  final String? link;
+
+  static String? _pickLocalized(Map<String, dynamic> data, String locale, List<String> keys) {
+    final lang = locale.toLowerCase().startsWith('ko') ? 'ko' : 'en';
+    for (final key in keys) {
+      final map = data[key];
+      if (map is Map) {
+        final localized = map[lang] ?? map['en'];
+        if (localized != null && '$localized'.trim().isNotEmpty) {
+          return '$localized'.trim();
+        }
+      }
+      final langFlat = data['${key}_$lang'] ?? (lang == 'ko' ? data['${key}Ko'] : data['${key}En']);
+      if (langFlat != null && '$langFlat'.trim().isNotEmpty) {
+        return '$langFlat'.trim();
+      }
+    }
+    for (final key in keys) {
+      final value = data[key];
+      if (value is String && value.trim().isNotEmpty) return value.trim();
+    }
+    return null;
+  }
+
+  factory AppAnnouncement.fromFirestore(
+    String id,
+    Map<String, dynamic> data, {
+    String locale = 'en',
+  }) {
+    final title = _pickLocalized(data, locale, const ['title', 'content']) ?? '';
+    final rawLink = data['link'] ?? data['url'];
+    final link = rawLink == null ? null : '$rawLink'.trim();
+    return AppAnnouncement(
+      id: id,
+      title: title,
+      link: (link == null || link.isEmpty) ? null : link,
+    );
+  }
 }
 
 class _AuthorSnapshot {
@@ -70,6 +121,122 @@ class DatabaseService {
   FirebaseFirestore? get _db {
     if (!FirebaseBootstrap.initialized) return null;
     return _firestore ?? FirebaseFirestore.instance;
+  }
+
+  CollectionReference<Map<String, dynamic>>? get _announcementsCol {
+    final db = _db;
+    if (db == null) return null;
+    return db.collection('announcements');
+  }
+
+  /// Newest announcement for the Home banner (`timestamp` desc, limit 1).
+  Future<AppAnnouncement?> fetchLatestAnnouncement({String locale = 'en'}) async {
+    final col = _announcementsCol;
+    if (col == null) return null;
+    try {
+      QuerySnapshot<Map<String, dynamic>> snap;
+      try {
+        snap = await col.orderBy('timestamp', descending: true).limit(1).get().timeout(_queryTimeout);
+      } catch (error) {
+        _logQueryError('announcements orderBy(timestamp)', error);
+        // Fallback: createdAt, then unordered + in-memory pick.
+        try {
+          snap = await col.orderBy('createdAt', descending: true).limit(1).get().timeout(_queryTimeout);
+        } catch (_) {
+          snap = await col.limit(20).get().timeout(_queryTimeout);
+        }
+      }
+      if (snap.docs.isEmpty) return null;
+      final docs = [...snap.docs];
+      docs.sort((a, b) {
+        DateTime? parse(DocumentSnapshot<Map<String, dynamic>> doc) {
+          final data = doc.data();
+          if (data == null) return null;
+          final raw = data['timestamp'] ?? data['createdAt'] ?? data['updatedAt'];
+          if (raw is Timestamp) return raw.toDate();
+          if (raw is DateTime) return raw;
+          if (raw is String) return DateTime.tryParse(raw);
+          return null;
+        }
+        final aAt = parse(a) ?? DateTime.fromMillisecondsSinceEpoch(0);
+        final bAt = parse(b) ?? DateTime.fromMillisecondsSinceEpoch(0);
+        return bAt.compareTo(aAt);
+      });
+      final doc = docs.first;
+      final data = doc.data();
+      final announcement = AppAnnouncement.fromFirestore(doc.id, data, locale: locale);
+      if (announcement.title.isEmpty) return null;
+      return announcement;
+    } catch (error, stack) {
+      _logQueryError('fetchLatestAnnouncement', error, stack);
+      return null;
+    }
+  }
+
+  /// Local fallback when Firestore is unavailable.
+  final Map<String, CachedVideo> _localCachedVideos = {};
+
+  CollectionReference<Map<String, dynamic>>? get _cachedVideosCol {
+    final db = _db;
+    if (db == null) return null;
+    return db.collection('cached_videos');
+  }
+
+  /// Returns cached YouTube metadata/sections for [videoId], or null if missing.
+  /// Prefer this over any YouTube Data API call when the document exists.
+  Future<CachedVideo?> getCachedVideo(String videoId) async {
+    final id = extractYoutubeVideoId(videoId) ?? videoId.trim();
+    if (id.isEmpty) return null;
+
+    final col = _cachedVideosCol;
+    if (col == null) {
+      return _localCachedVideos[id];
+    }
+    try {
+      final snap = await col.doc(id).get().timeout(_queryTimeout);
+      if (!snap.exists || snap.data() == null) {
+        return _localCachedVideos[id];
+      }
+      final cached = CachedVideo.fromFirestore(id, snap.data()!);
+      _localCachedVideos[id] = cached;
+      return cached;
+    } catch (error, stack) {
+      _logQueryError('getCachedVideo($id)', error, stack);
+      return _localCachedVideos[id];
+    }
+  }
+
+  /// Upserts `cached_videos/{videoId}` with title, duration, thumbnail, sections.
+  Future<void> upsertCachedVideo({
+    required String videoId,
+    required String title,
+    required double duration,
+    required String thumbnailUrl,
+    required List<RoutineSegment> sections,
+  }) async {
+    final id = extractYoutubeVideoId(videoId) ?? videoId.trim();
+    if (id.isEmpty) return;
+
+    final cached = CachedVideo(
+      videoId: id,
+      title: title.trim().isEmpty ? id : title.trim(),
+      duration: duration > 0 ? duration : 0,
+      thumbnailUrl: thumbnailUrl.trim().isNotEmpty
+          ? thumbnailUrl.trim()
+          : (youtubeThumbnailUrl(id) ?? ''),
+      sections: List<RoutineSegment>.from(sections),
+      updatedAt: DateTime.now(),
+    );
+    _localCachedVideos[id] = cached;
+
+    final col = _cachedVideosCol;
+    if (col == null) return;
+    try {
+      await col.doc(id).set(cached.toFirestore(), SetOptions(merge: true)).timeout(_queryTimeout);
+      debugPrint('[LOOPI] cached_videos upserted $id sections=${sections.length}');
+    } catch (error, stack) {
+      _logQueryError('upsertCachedVideo($id)', error, stack);
+    }
   }
 
   DocumentReference<Map<String, dynamic>>? _userProfileRef(String uid) {

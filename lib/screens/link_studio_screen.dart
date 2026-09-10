@@ -13,6 +13,7 @@ import 'package:video_player/video_player.dart';
 import 'package:audioplayers/audioplayers.dart';
 
 import '../models/routine_models.dart';
+import '../services/database_service.dart';
 import '../state/link_studio_session.dart';
 import '../state/routine_library.dart';
 import '../theme/loopi_colors.dart';
@@ -23,6 +24,7 @@ import '../utils/youtube_player_factory.dart';
 import '../utils/media_blob.dart';
 import '../widgets/app_logo.dart';
 import '../widgets/highlight_interval.dart';
+import '../widgets/load_cached_routine_dialog.dart';
 import '../widgets/save_routine_dialog.dart';
 import 'practice_mode_screen.dart';
 
@@ -122,6 +124,9 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
   bool _showClipboardBanner = false;
   bool? _isMirrored = false;
   bool _disposing = false;
+  /// Best-effort title from iframe metadata (no YouTube Data API).
+  String? _videoTitle;
+  final DatabaseService _database = DatabaseService();
   final ScrollController _routineListHorizontalController = ScrollController();
   final ScrollController _routineListVerticalController = ScrollController();
 
@@ -352,6 +357,10 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
   }
 
   void _onPlayerValue(YoutubePlayerValue value) {
+    final title = value.metaData.title.trim();
+    if (title.isNotEmpty) {
+      _videoTitle = title;
+    }
     final seconds = value.metaData.duration.inMilliseconds / 1000.0;
     if (seconds > 1 && (_session.videoDuration - seconds).abs() > 0.5) {
       _session.setVideoDuration(seconds);
@@ -549,11 +558,68 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
       );
       return;
     }
+
+    // Editing an existing routine already owns its sections — skip cache prompt.
+    final skipCachePrompt = widget.isEditMode;
+
+    // 1) Firestore cache first — skip YouTube Data API metadata when present.
+    final cached = skipCachePrompt ? null : await _database.getCachedVideo(id);
+    if (!mounted) return;
+
+    final useCachedSections = cached != null && cached.hasSections
+        ? await showLoadCachedRoutineDialog(context)
+        : null;
+    if (!mounted) return;
+
     setState(() {
       _videoId = id;
       _videoUrl = trimmed;
+      if (cached != null && cached.title.isNotEmpty) {
+        _videoTitle = cached.title;
+      }
     });
+
+    if (cached != null) {
+      debugPrint(
+        '[LOOPI] cached_videos hit $id sections=${cached.sections.length} '
+        'choice=$useCachedSections',
+      );
+      if (useCachedSections == true) {
+        _session.applyCachedSections(
+          cached.sections,
+          duration: cached.duration > 1 ? cached.duration : null,
+        );
+      } else {
+        // "새로 설정" or dismissed → default empty window (keep cached duration if known).
+        _session.resetToDefaultSections(
+          duration: cached.duration > 1 ? cached.duration : null,
+        );
+      }
+      _syncRowControllers();
+      if (mounted) setState(() {});
+    } else {
+      debugPrint('[LOOPI] cached_videos miss $id — loading via player (no Data API)');
+      // No cache: default/empty sections; duration fills in from iframe metadata.
+      _session.resetToDefaultSections();
+      _syncRowControllers();
+      if (mounted) setState(() {});
+    }
+
+    // Playback still uses the iframe player (not YouTube Data API quota).
     await _yt(() => _youtubePlayer.cueVideoById(videoId: id));
+  }
+
+  Future<void> _persistCachedVideo(SavedRoutine routine) async {
+    final id = resolveYoutubeVideoId(videoId: routine.videoId, videoUrl: routine.videoUrl);
+    if (id == null || id.isEmpty) return;
+    if (routine.sourceType != SourceType.youtube) return;
+    await _database.upsertCachedVideo(
+      videoId: id,
+      title: (_videoTitle?.trim().isNotEmpty == true) ? _videoTitle!.trim() : routine.name,
+      duration: _session.videoDuration,
+      thumbnailUrl: youtubeThumbnailUrl(id) ?? '',
+      sections: routine.segments,
+    );
   }
 
   String? _normalizeYoutubeUrl(String input) {
@@ -1032,6 +1098,7 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
 
     if (overwrite) {
       await widget.library.update(routine);
+      unawaited(_persistCachedVideo(routine));
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('"${result.name}" 루틴을 덮어썼습니다.')),
@@ -1043,6 +1110,7 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
     }
 
     await widget.library.save(routine);
+    unawaited(_persistCachedVideo(routine));
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text('"${result.name}" ${'studio.save_success'.tr()}')),

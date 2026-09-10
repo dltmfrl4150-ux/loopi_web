@@ -11,10 +11,8 @@
   "home": {
     "greeting": "Good day,",
     "subtitle": "Shall we continue the rhythm today?",
-    "weekly_stats": "Weekly Learning Streak",
-    "continuous_learning": "Continuous Learning",
-    "this_week": "This Week",
-    "saved_routines": "Saved Routines",
+    "announcement_fallback": "Welcome to LOOPI! Check out our new mirror and loop features 🔁",
+    "announcement_semantics": "Announcement",
     "quick_action": "Create New Routine",
     "quick_action_subtitle": "Register YouTube Link",
     "recent_routines": "Recently Practiced Routines",

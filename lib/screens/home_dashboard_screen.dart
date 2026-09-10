@@ -1,6 +1,9 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:easy_localization/easy_localization.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../models/routine_models.dart';
 import '../models/routine_category.dart';
@@ -281,9 +284,16 @@ class _HomeDashboardScreenState extends State<HomeDashboardScreen> {
   }
 
   void _openInShell(Widget page) {
-    if (Navigator.of(context).canPop()) {
-      Navigator.of(context).popUntil((route) => route.isFirst);
+    // When a shell page is already open (e.g. practice → comparison), only swap
+    // content. Calling popUntil here disposes the practice screen mid-callback
+    // and can trigger the red error screen.
+    if (_shellPage == null) {
+      final navigator = Navigator.of(context);
+      if (navigator.canPop()) {
+        navigator.popUntil((route) => route.isFirst);
+      }
     }
+    if (!mounted) return;
     setState(() {
       _shellPage = ShellCloseScope(close: _closeShell, child: page);
     });
@@ -475,10 +485,7 @@ class _HomeTab extends StatelessWidget {
           ),
         ),
         const SizedBox(height: 20),
-        AnimatedBuilder(
-          animation: library,
-          builder: (context, _) => _WeeklyStatsCard(routineCount: library.routines.length),
-        ),
+        const _AnnouncementBanner(),
         const SizedBox(height: 20),
         Text(
           'home.quick_action'.tr(),
@@ -537,94 +544,130 @@ class _HomeTab extends StatelessWidget {
   }
 }
 
-class _WeeklyStatsCard extends StatelessWidget {
-  const _WeeklyStatsCard({required this.routineCount});
-
-  final int routineCount;
+class _AnnouncementBanner extends StatefulWidget {
+  const _AnnouncementBanner();
 
   @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-
-    return Container(
-      padding: const EdgeInsets.all(18),
-      decoration: BoxDecoration(
-        color: scheme.surfaceContainerHighest,
-        borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: scheme.outlineVariant),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            'home.weekly_stats'.tr(),
-            style: TextStyle(
-              color: scheme.onSurface,
-              fontWeight: FontWeight.w700,
-              fontSize: 16,
-            ),
-          ),
-          const SizedBox(height: 14),
-          Row(
-            children: [
-              Expanded(
-                child: _StatCell(
-                  icon: Icons.local_fire_department_rounded,
-                  label: 'home.continuous_learning'.tr(),
-                  value: '5${'common.days'.tr()}',
-                ),
-              ),
-              Expanded(
-                child: _StatCell(
-                  icon: Icons.timer_outlined,
-                  label: 'home.this_week'.tr(),
-                  value: '42${'common.minutes'.tr()}',
-                ),
-              ),
-              Expanded(
-                child: _StatCell(
-                  icon: Icons.library_music_outlined,
-                  label: 'home.saved_routines'.tr(),
-                  value: '$routineCount',
-                ),
-              ),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
+  State<_AnnouncementBanner> createState() => _AnnouncementBannerState();
 }
 
-class _StatCell extends StatelessWidget {
-  const _StatCell({
-    required this.icon,
-    required this.label,
-    required this.value,
-  });
+class _AnnouncementBannerState extends State<_AnnouncementBanner> {
+  final DatabaseService _database = DatabaseService();
+  AppAnnouncement? _announcement;
+  bool _loading = true;
 
-  final IconData icon;
-  final String label;
-  final String value;
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) unawaited(_load());
+    });
+  }
+
+  Future<void> _load() async {
+    final locale = context.locale.languageCode;
+    final latest = await _database.fetchLatestAnnouncement(locale: locale);
+    if (!mounted) return;
+    setState(() {
+      _announcement = latest;
+      _loading = false;
+    });
+  }
+
+  Future<void> _openLink(String raw) async {
+    final uri = Uri.tryParse(raw.trim());
+    if (uri == null) return;
+    try {
+      await launchUrl(uri, mode: LaunchMode.externalApplication);
+    } catch (_) {}
+  }
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    return Column(
-      children: [
-        Icon(icon, color: LoopiColors.purple),
-        const SizedBox(height: 8),
-        Text(
-          value,
-          style: TextStyle(
-            color: scheme.onSurface,
-            fontWeight: FontWeight.w800,
-            fontSize: 18,
+    final text = (_announcement?.title.isNotEmpty == true)
+        ? _announcement!.title
+        : 'home.announcement_fallback'.tr();
+    final link = _announcement?.link;
+    final tappable = link != null && link.isNotEmpty;
+
+    return Semantics(
+      label: 'home.announcement_semantics'.tr(),
+      button: tappable,
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: tappable ? () => unawaited(_openLink(link)) : null,
+          borderRadius: BorderRadius.circular(16),
+          child: Ink(
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(16),
+              gradient: LinearGradient(
+                colors: [
+                  LoopiColors.purple.withValues(alpha: 0.12),
+                  kHighlightPink.withValues(alpha: 0.08),
+                ],
+                begin: Alignment.centerLeft,
+                end: Alignment.centerRight,
+              ),
+              border: Border.all(
+                color: LoopiColors.purple.withValues(alpha: 0.28),
+              ),
+            ),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Container(
+                    width: 36,
+                    height: 36,
+                    decoration: BoxDecoration(
+                      color: LoopiColors.purple.withValues(alpha: 0.16),
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: Icon(
+                      Icons.campaign_rounded,
+                      color: LoopiColors.purpleDark,
+                      size: 20,
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: _loading
+                        ? Text(
+                            'home.announcement_fallback'.tr(),
+                            style: TextStyle(
+                              color: scheme.onSurface.withValues(alpha: 0.72),
+                              fontSize: 14,
+                              height: 1.35,
+                              fontWeight: FontWeight.w500,
+                            ),
+                          )
+                        : Text(
+                            text,
+                            style: TextStyle(
+                              color: scheme.onSurface,
+                              fontSize: 14,
+                              height: 1.35,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                  ),
+                  if (tappable) ...[
+                    const SizedBox(width: 8),
+                    Icon(
+                      Icons.open_in_new_rounded,
+                      size: 16,
+                      color: scheme.onSurfaceVariant,
+                    ),
+                  ],
+                ],
+              ),
+            ),
           ),
         ),
-        const SizedBox(height: 2),
-        Text(label, style: TextStyle(color: scheme.onSurfaceVariant, fontSize: 12)),
-      ],
+      ),
     );
   }
 }
@@ -1346,9 +1389,21 @@ class _LibraryTabState extends State<_LibraryTab> with SingleTickerProviderState
                                 return;
                               }
                               final routine = widget.library.byId(result.routineId);
-                              if (routine != null) {
+                              if (routine == null) {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(
+                                    content: Text('원본 루틴을 찾을 수 없어 재생할 수 없습니다.'),
+                                  ),
+                                );
+                                return;
+                              }
+                              try {
                                 widget.onOpenPracticeView(
                                   PracticeResultViewer(routine: routine, result: result),
+                                );
+                              } catch (error) {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  SnackBar(content: Text('재생 화면을 열 수 없습니다.\n$error')),
                                 );
                               }
                             },

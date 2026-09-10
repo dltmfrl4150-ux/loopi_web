@@ -45,5 +45,17 @@ service cloud.firestore {
       allow update: if isCommunityAuthor() || onlySocialUpdate();
       allow delete: if isCommunityAuthor();
     }
+
+    match /announcements/{id} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    // Shared YouTube metadata + section cache (videoId is the document id).
+    match /cached_videos/{videoId} {
+      allow read: if true;
+      allow create, update: if isSignedIn();
+      allow delete: if false;
+    }
   }
 }

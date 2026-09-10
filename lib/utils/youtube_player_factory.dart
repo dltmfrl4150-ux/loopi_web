@@ -1,9 +1,32 @@
 import 'dart:async';
+import 'dart:ui' show PlatformDispatcher;
 
 import 'package:flutter/widgets.dart';
 import 'package:youtube_player_iframe/youtube_player_iframe.dart';
 
 import 'youtube_id.dart';
+
+bool _youtubeInteropGuardInstalled = false;
+
+/// Marks known youtube_player_iframe JS-interop TypeErrors as handled so they
+/// cannot kill Dart microtasks (engine poll / stopRecording Completers).
+void installYoutubeInteropErrorGuard() {
+  if (_youtubeInteropGuardInstalled) return;
+  _youtubeInteropGuardInstalled = true;
+  final previous = PlatformDispatcher.instance.onError;
+  PlatformDispatcher.instance.onError = (Object error, StackTrace stack) {
+    final msg = error.toString();
+    final isYtInterop = msg.contains('youtube_player_iframe') ||
+        msg.contains("type 'int' is not a subtype of type 'Map<String, dynamic>'") ||
+        msg.contains("type 'double' is not a subtype of type 'Map<String, dynamic>'") ||
+        (msg.contains('TypeError') && msg.contains('Map<String, dynamic>'));
+    if (isYtInterop) {
+      debugPrint('Ignored YouTube interop error to keep listener alive: $error');
+      return true;
+    }
+    return previous?.call(error, stack) ?? false;
+  };
+}
 
 /// Player params for embedded playback.
 ///
@@ -40,9 +63,10 @@ String youtubeEmbedUrl(String videoId, {double? startSeconds}) {
   if (id == null) {
     throw ArgumentError.value(videoId, 'videoId', 'Not a valid YouTube id or URL');
   }
+  final start = startSeconds;
   return Uri.https('www.youtube.com', '/embed/$id', {
     'enablejsapi': '1',
-    if (startSeconds != null && startSeconds > 0) 'start': '${startSeconds.round()}',
+    if (start != null && start >= 0) 'start': '${start.round()}',
   }).toString();
 }
 
@@ -57,25 +81,40 @@ Widget loopiYoutubePlayer({
   );
 }
 
+/// Creates a YouTube controller cued at [startSeconds] (section start), not 0.
+///
+/// `youtube_player_iframe` has no `YoutubePlayerParams.startAt` — the start
+/// offset must be passed to [YoutubePlayerController.fromVideoId] /
+/// `cueVideoById` as [startSeconds].
 YoutubePlayerController createLoopiYoutubeController({
   required String videoId,
   bool autoPlay = false,
   double? startSeconds,
+  double? endSeconds,
 }) {
+  installYoutubeInteropErrorGuard();
   final clean = extractYoutubeVideoId(videoId);
   if (clean == null) {
     throw ArgumentError.value(videoId, 'videoId', 'Not a valid YouTube id or URL');
   }
+  final start = startSeconds != null && startSeconds.isFinite && startSeconds >= 0
+      ? startSeconds
+      : null;
+  final end = endSeconds != null && endSeconds.isFinite && start != null && endSeconds > start
+      ? endSeconds
+      : null;
   return YoutubePlayerController.fromVideoId(
     videoId: clean,
     autoPlay: autoPlay,
-    startSeconds: startSeconds,
+    startSeconds: start,
+    endSeconds: end,
     params: loopiYoutubeParams(),
   );
 }
 
 /// Guards iframe calls. On Flutter web the controller throws if the player
 /// is not ready, was disposed, or the widget unmounted mid-await.
+/// Also swallows JS-interop TypeErrors (e.g. int vs Map) so callers stay alive.
 Future<T?> safeYoutubePlayerCall<T>(
   Future<T> Function() action, {
   bool Function()? isAlive,
@@ -84,7 +123,11 @@ Future<T?> safeYoutubePlayerCall<T>(
   try {
     return await action();
   } catch (error, stack) {
-    debugPrint('YouTube iframe call ignored: $error\n$stack');
+    debugPrint('Ignored YouTube interop error to keep listener alive: $error');
+    assert(() {
+      debugPrint('$stack');
+      return true;
+    }());
     return null;
   }
 }
