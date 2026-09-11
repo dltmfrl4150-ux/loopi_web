@@ -1,3 +1,4 @@
+import 'package:flutter/material.dart';
 import 'dart:async';
 import 'dart:ui' show PlatformDispatcher;
 
@@ -73,11 +74,14 @@ String youtubeEmbedUrl(String videoId, {double? startSeconds}) {
 Widget loopiYoutubePlayer({
   required YoutubePlayerController controller,
   double aspectRatio = 16 / 9,
+  Color? backgroundColor,
 }) {
   return YoutubePlayer(
     controller: controller,
     aspectRatio: aspectRatio,
     keepAlive: true,
+    // Avoid harsh black letterboxing around Shorts / vertical embeds.
+    backgroundColor: backgroundColor ?? Colors.transparent,
   );
 }
 

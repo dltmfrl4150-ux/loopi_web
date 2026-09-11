@@ -7,6 +7,7 @@ import 'package:easy_localization/easy_localization.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:pointer_interceptor/pointer_interceptor.dart';
 import 'package:record/record.dart';
 import 'package:video_player/video_player.dart';
 import 'package:youtube_player_iframe/youtube_player_iframe.dart';
@@ -65,6 +66,12 @@ SavedRoutine sanitizeRoutineForPractice(SavedRoutine routine) {
     category: routine.category,
     isMirrored: routine.isMirroredOn,
   );
+}
+
+double originalAspectRatioForRoutine(SavedRoutine routine) {
+  final url = routine.videoUrl.toLowerCase();
+  if (url.contains('/shorts/') || url.contains('shorts')) return 9 / 16;
+  return 16 / 9;
 }
 
 class PracticeScreen extends StatelessWidget {
@@ -303,38 +310,150 @@ class _VideoPracticeScreenState extends State<VideoPracticeScreen> {
   }
 
   Future<void> _initCameraSafely() async {
+    CameraController? pending;
     try {
-      await Future.any([
-        () async {
-          final cameras = await availableCameras();
-          if (cameras.isEmpty) {
-            throw CameraException('cameraNotFound', 'No cameras available');
+      debugPrint('[LOOPI] camera init: listing devices…');
+      // Do NOT race a short Future.any timeout here — mobile permission prompts
+      // and first-time initialize commonly take >5s and were incorrectly
+      // forcing Audio-only mode.
+      final cameras = await availableCameras();
+      if (cameras.isEmpty) {
+        throw CameraException('cameraNotFound', 'No cameras available');
+      }
+
+      // Prefer front camera for practice selfie; fall back to any device.
+      var description = cameras.first;
+      for (final camera in cameras) {
+        if (camera.lensDirection == CameraLensDirection.front) {
+          description = camera;
+          break;
+        }
+      }
+
+      debugPrint(
+        '[LOOPI] camera selected name=${description.name} '
+        'lens=${description.lensDirection} count=${cameras.length}',
+      );
+
+      Object? lastError;
+      for (final preset in <ResolutionPreset>[
+        kPracticeCameraPreset,
+        kPracticeCameraFallbackPreset,
+      ]) {
+        try {
+          debugPrint('[LOOPI] camera initialize trying preset=$preset …');
+          pending = CameraController(
+            description,
+            preset,
+            enableAudio: true,
+          );
+          await pending.initialize();
+          if (!mounted) {
+            await pending.dispose();
+            pending = null;
+            return;
           }
-          _camera = CameraController(cameras.first, kPracticeCameraPreset, enableAudio: true);
-          await _camera!.initialize();
-        }(),
-        Future<void>.delayed(const Duration(seconds: 5), () => throw TimeoutException('camera')),
-      ]);
-    } on CameraException catch (error) {
-      await _camera?.dispose();
+          _camera = pending;
+          pending = null;
+          _cameraError = null;
+          _audioOnlyMode = false;
+          debugPrint('[LOOPI] camera initialized OK preset=$preset');
+          if (mounted) setState(() {});
+          return;
+        } catch (error, stack) {
+          lastError = error;
+          debugPrint(
+            '[LOOPI] camera initialize FAILED preset=$preset: $error\n$stack',
+          );
+          try {
+            await pending?.dispose();
+          } catch (_) {}
+          pending = null;
+          _camera = null;
+        }
+      }
+
+      throw lastError ?? CameraException('initFailed', 'Camera initialize failed');
+    } catch (error, stack) {
+      debugPrint('[LOOPI] camera init FINAL FAILURE: $error\n$stack');
+      try {
+        await pending?.dispose();
+      } catch (_) {}
+      try {
+        await _camera?.dispose();
+      } catch (_) {}
+      pending = null;
       _camera = null;
-      _cameraError = error.description ?? error.code;
-      await _enableAudioOnlyIfPossible();
-    } catch (error) {
-      await _camera?.dispose();
-      _camera = null;
-      _cameraError = error.toString();
-      await _enableAudioOnlyIfPossible();
+      _cameraError = error is CameraException
+          ? (error.description ?? error.code)
+          : error.toString();
+      await _handleCameraInitFailure(error);
     }
     if (mounted) setState(() {});
   }
 
-  Future<void> _enableAudioOnlyIfPossible() async {
+  /// Audio-only ONLY when there is no usable camera (missing / permission denied),
+  /// never for transient timeouts or overconstrained retries that we already exhausted.
+  Future<void> _handleCameraInitFailure(Object error) async {
+    final message = error.toString().toLowerCase();
+    final code = error is CameraException ? error.code.toLowerCase() : '';
+    final noCamera = code.contains('cameranotfound') ||
+        message.contains('no cameras') ||
+        message.contains('notfound');
+    final permissionDenied = code.contains('permission') ||
+        code.contains('withoutpermissions') ||
+        code.contains('accessdenied') ||
+        message.contains('permission') ||
+        message.contains('notallowed') ||
+        message.contains('denied');
+
+    debugPrint(
+      '[LOOPI] camera failure classified noCamera=$noCamera '
+      'permissionDenied=$permissionDenied raw=$error',
+    );
+
+    bool micReady = false;
     try {
-      final micReady = await _recorder.hasPermission();
-      _audioOnlyMode = micReady;
-    } catch (_) {
-      _audioOnlyMode = false;
+      micReady = await _recorder.hasPermission();
+    } catch (e) {
+      debugPrint('[LOOPI] mic permission check failed: $e');
+      micReady = false;
+    }
+
+    // Only fall back to audio-only for real camera unavailability.
+    if ((noCamera || permissionDenied) && micReady) {
+      _audioOnlyMode = true;
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              permissionDenied
+                  ? '카메라 권한이 없어 음성 전용 모드로 전환합니다. (원인: $_cameraError)'
+                  : '카메라를 찾을 수 없어 음성 전용 모드로 전환합니다. (원인: $_cameraError)',
+            ),
+            duration: const Duration(seconds: 5),
+          ),
+        );
+      }
+      return;
+    }
+
+    _audioOnlyMode = false;
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            micReady
+                ? '카메라 초기화에 실패했습니다: $_cameraError'
+                : '카메라/마이크를 사용할 수 없습니다: $_cameraError',
+          ),
+          duration: const Duration(seconds: 5),
+          action: SnackBarAction(
+            label: '재시도',
+            onPressed: () => unawaited(_initCameraSafely()),
+          ),
+        ),
+      );
     }
   }
 
@@ -405,12 +524,48 @@ class _VideoPracticeScreenState extends State<VideoPracticeScreen> {
   }
 
   Future<void> _toggleRecording() async {
-    final camera = _camera;
-    final cameraAvailable = camera?.value.isInitialized == true;
+    var camera = _camera;
+    var cameraAvailable = camera?.value.isInitialized == true;
+
+    // If camera was not ready yet (slow mobile init), retry once before falling back.
+    if (!cameraAvailable && !_audioOnlyMode) {
+      debugPrint('[LOOPI] camera not ready at record press — retrying init');
+      await _initCameraSafely();
+      camera = _camera;
+      cameraAvailable = camera?.value.isInitialized == true;
+    }
+
     final microphoneAvailable = await _recorder.hasPermission();
     if (!cameraAvailable && microphoneAvailable) {
-      _audioOnlyMode = true;
-      await _toggleAudioOnlyRecording();
+      if (!mounted) return;
+      final proceed = await showDialog<bool>(
+        context: context,
+        builder: (dialogContext) => PointerInterceptor(
+          child: AlertDialog(
+            title: const Text('카메라를 사용할 수 없습니다'),
+            content: Text(
+              _cameraError == null
+                  ? '카메라 없이 음성만 녹화할까요?'
+                  : '카메라 오류: $_cameraError\n\n음성만 녹화할까요?',
+            ),
+            actions: [
+              TextButton(onPressed: () => Navigator.pop(dialogContext, false), child: const Text('취소')),
+              TextButton(
+                onPressed: () {
+                  unawaited(_initCameraSafely());
+                  Navigator.pop(dialogContext, false);
+                },
+                child: const Text('카메라 재시도'),
+              ),
+              FilledButton(onPressed: () => Navigator.pop(dialogContext, true), child: const Text('음성만 녹화')),
+            ],
+          ),
+        ),
+      );
+      if (proceed == true) {
+        _audioOnlyMode = true;
+        await _toggleAudioOnlyRecording();
+      }
       return;
     }
     if (!cameraAvailable || !microphoneAvailable) {
@@ -422,13 +577,15 @@ class _VideoPracticeScreenState extends State<VideoPracticeScreen> {
       if (!mounted) return;
       final proceed = await showDialog<bool>(
         context: context,
-        builder: (dialogContext) => AlertDialog(
-          title: Text(missing),
-          content: const Text('계속 진행하시겠습니까?'),
-          actions: [
-            TextButton(onPressed: () => Navigator.pop(dialogContext, false), child: const Text('아니오')),
-            FilledButton(onPressed: () => Navigator.pop(dialogContext, true), child: const Text('네')),
-          ],
+        builder: (dialogContext) => PointerInterceptor(
+          child: AlertDialog(
+            title: Text(missing),
+            content: const Text('계속 진행하시겠습니까?'),
+            actions: [
+              TextButton(onPressed: () => Navigator.pop(dialogContext, false), child: const Text('아니오')),
+              FilledButton(onPressed: () => Navigator.pop(dialogContext, true), child: const Text('네')),
+            ],
+          ),
         ),
       );
       if (proceed == true) {
@@ -447,6 +604,7 @@ class _VideoPracticeScreenState extends State<VideoPracticeScreen> {
       if (camera == null || !camera.value.isInitialized) {
         throw StateError('Camera unavailable');
       }
+      _audioOnlyMode = false;
       _recording = true;
       _beginRecordClock();
       _recordingTimer?.cancel();
@@ -460,6 +618,7 @@ class _VideoPracticeScreenState extends State<VideoPracticeScreen> {
       if (mounted) setState(() {});
     } catch (error) {
       _recording = false;
+      debugPrint('[LOOPI] startVideoRecording failed: $error');
       if (mounted) setState(() => _error = '녹화에 실패했습니다: $error');
     }
   }
@@ -947,11 +1106,13 @@ class _VideoPracticeScreenState extends State<VideoPracticeScreen> {
       return;
     }
 
-    _engineAdvancing = !previewOnly;
-    _engineSeeking = true;
-    if (!previewOnly) _cancelEngineListeners();
+    if (!previewOnly) {
+      _engineAdvancing = true;
+      _engineSeeking = true;
+      _cancelEngineListeners();
+    }
 
-    _logIntervalTransition(index);
+    if (!previewOnly) _logIntervalTransition(index);
     _engineSegmentIndex = index;
     final segment = widget.routine.segments[index];
     if (fromUserSelection && !_isPracticeRecordingActive) {
@@ -964,55 +1125,78 @@ class _VideoPracticeScreenState extends State<VideoPracticeScreen> {
     if (resetPlays) {
       _engineLoopsCompleted = 0;
     }
+    // Always re-anchor from the section start so wall-clock estimates cannot
+    // stay stuck past EOF (e.g. atTime=39 on a 27s Short).
     _markEngineSegmentAnchor(segment.startSec, segment.speed);
 
+    // Preview (chip tap before Record): seek + pause only — never auto-play.
+    if (previewOnly) {
+      unawaited(_seekEngineMedia(segment, play: false));
+      return;
+    }
+
+    // Recording progression: never block the engine poll on hung YouTube seeks.
+    unawaited(_seekEngineMedia(segment, play: true, token: token));
+  }
+
+  /// Seek/rate (and optionally play) without stalling the recording timer loop.
+  Future<void> _seekEngineMedia(
+    RoutineSegment segment, {
+    required bool play,
+    int? token,
+  }) async {
+    final seekSec = _clampSeekToMedia(segment.startSec);
     try {
-      final original = _original;
-      if (original != null) {
-        await original.setPlaybackSpeed(segment.speed);
-        final seekSec = _clampSeekToMedia(segment.startSec);
-        await original.seekTo(Duration(milliseconds: (seekSec * 1000).round()));
-      }
-      if (_youtubeOriginal != null) {
+      await Future<void>(() async {
         try {
-          await _yt((player) => player.setPlaybackRate(segment.speed))
-              .timeout(const Duration(seconds: 2), onTimeout: () => null);
-          final seekSec = _clampSeekToMedia(segment.startSec);
-          await _yt(
-            (player) => player.seekTo(seconds: seekSec, allowSeekAhead: true),
-          ).timeout(const Duration(seconds: 2), onTimeout: () => null);
+          final original = _original;
+          if (original != null) {
+            await original.setPlaybackSpeed(segment.speed);
+            await original.seekTo(Duration(milliseconds: (seekSec * 1000).round()));
+            if (play) {
+              await original.play();
+            } else {
+              await original.pause();
+            }
+          }
         } catch (e) {
-          debugPrint('Ignored YouTube interop error to keep listener alive: $e');
+          debugPrint('[LOOPI] engine local seek/play ignored: $e');
+        }
+        if (_youtubeOriginal != null) {
+          try {
+            await _yt((player) => player.setPlaybackRate(segment.speed))
+                .timeout(const Duration(milliseconds: 800), onTimeout: () => null);
+            await _yt(
+              (player) => player.seekTo(seconds: seekSec, allowSeekAhead: true),
+            ).timeout(const Duration(milliseconds: 800), onTimeout: () => null);
+            if (play) {
+              await _yt((player) => player.playVideo())
+                  .timeout(const Duration(milliseconds: 800), onTimeout: () => null);
+            } else {
+              await _yt((player) => player.pauseVideo())
+                  .timeout(const Duration(milliseconds: 800), onTimeout: () => null);
+            }
+          } catch (e) {
+            debugPrint('Ignored YouTube interop error to keep listener alive: $e');
+          }
+        }
+      }).timeout(
+        const Duration(seconds: 2),
+        onTimeout: () {
+          debugPrint('[LOOPI] engine seek/play timed out — continuing poll');
+        },
+      );
+    } catch (e) {
+      debugPrint('[LOOPI] engine seek/play failed: $e');
+    } finally {
+      if (play) {
+        _engineSeeking = false;
+        _engineAdvancing = false;
+        if (token != null && token == _engineEpoch && _engineSessionLive) {
+          _armEnginePoll(token);
         }
       }
-    } catch (_) {}
-
-    if (!previewOnly && (!_engineSessionLive || token != _engineEpoch)) {
-      _engineSeeking = false;
-      _engineAdvancing = false;
-      return;
     }
-
-    await Future<void>.delayed(const Duration(milliseconds: 80));
-    if (!previewOnly && (!_engineSessionLive || token != _engineEpoch)) {
-      _engineSeeking = false;
-      _engineAdvancing = false;
-      return;
-    }
-
-    try {
-      await _original?.play();
-    } catch (_) {}
-    try {
-      await _yt((player) => player.playVideo())
-          .timeout(const Duration(seconds: 2), onTimeout: () => null);
-    } catch (e) {
-      debugPrint('Ignored YouTube interop error to keep listener alive: $e');
-    }
-
-    _engineSeeking = false;
-    _engineAdvancing = false;
-    if (!previewOnly) _armEnginePoll(token);
   }
 
   double _clampSeekToMedia(double seconds) {
@@ -1497,6 +1681,7 @@ class _VideoPracticeScreenState extends State<VideoPracticeScreen> {
         intervalMarkers: List<PracticeIntervalMarker>.from(_intervalMarkers),
         recordedAudioPath: recordedAudioPath,
         recordedSectionIndex: recordedSectionIndex,
+        originalAspectRatio: originalAspectRatioForRoutine(widget.routine),
       );
       final openInShell = widget.onOpenInShell;
       if (openInShell != null) {
@@ -1838,10 +2023,14 @@ class _VideoPracticeScreenState extends State<VideoPracticeScreen> {
           const SizedBox(height: 8),
           Expanded(
             child: ColoredBox(
-              color: Colors.black,
+              color: Theme.of(context).scaffoldBackgroundColor,
               child: _fittedAspect(
                 _originalAspectRatio,
-                loopiYoutubePlayer(controller: _youtubeOriginal!),
+                loopiYoutubePlayer(
+                  controller: _youtubeOriginal!,
+                  aspectRatio: _originalAspectRatio,
+                  backgroundColor: Colors.transparent,
+                ),
               ),
             ),
           ),
@@ -1880,13 +2069,29 @@ class _VideoPracticeScreenState extends State<VideoPracticeScreen> {
         if (_cameraError != null)
           Padding(
             padding: const EdgeInsets.only(bottom: 8),
-            child: Text(
-              _audioOnlyMode ? 'player.audio_only_hint'.tr() : '카메라가 감지되지 않았습니다 (가상 녹화 모드).',
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  _audioOnlyMode
+                      ? 'player.audio_only_hint'.tr()
+                      : '카메라 초기화 실패: $_cameraError',
+                  style: const TextStyle(color: Colors.orangeAccent, fontSize: 12),
+                ),
+                if (!_audioOnlyMode) ...[
+                  const SizedBox(height: 4),
+                  TextButton.icon(
+                    onPressed: () => unawaited(_initCameraSafely()),
+                    icon: const Icon(Icons.refresh, size: 16),
+                    label: const Text('카메라 다시 시도'),
+                  ),
+                ],
+              ],
             ),
           ),
         Expanded(
           child: ColoredBox(
-            color: Colors.black87,
+            color: Theme.of(context).scaffoldBackgroundColor,
             child: _fittedAspect(
               _previewAspectRatio,
               camera == null || !camera.value.isInitialized
@@ -1938,7 +2143,7 @@ class _VideoPracticeScreenState extends State<VideoPracticeScreen> {
         const SizedBox(height: 8),
         Expanded(
           child: ColoredBox(
-            color: Colors.black,
+            color: Theme.of(context).scaffoldBackgroundColor,
             child: _fittedAspect(
               ratio,
               player?.value.isInitialized == true
@@ -1965,6 +2170,8 @@ class MotionComparisonViewer extends StatefulWidget {
     this.intervalMarkers = const [],
     this.recordedAudioPath,
     this.recordedSectionIndex,
+    this.originalAspectRatio,
+    this.youtubeVideoId,
   });
 
   final VideoPlayerController? original;
@@ -1978,6 +2185,9 @@ class MotionComparisonViewer extends StatefulWidget {
   final String? recordedAudioPath;
   /// Section index that was actually recorded (e.g. D). Unrecorded chips are disabled.
   final int? recordedSectionIndex;
+  /// Prefer 9/16 for Shorts so comparison does not force 16:9 letterboxing.
+  final double? originalAspectRatio;
+  final String? youtubeVideoId;
 
   @override
   State<MotionComparisonViewer> createState() => _MotionComparisonViewerState();
@@ -2000,6 +2210,8 @@ class _MotionComparisonViewerState extends State<MotionComparisonViewer> {
   bool _audioReady = false;
   bool _disposing = false;
   bool _loopingBack = false;
+  /// Suppress YouTube→recorded drive while we are intentionally seeking chips.
+  bool _ignoreYoutubeDrive = false;
 
   bool get _youtubeAlive => !_disposing && mounted && widget.originalYoutube != null;
 
@@ -2092,7 +2304,7 @@ class _MotionComparisonViewerState extends State<MotionComparisonViewer> {
 
   void _onYoutubeChanged(YoutubePlayerValue value) {
     // youtube_player_iframe has no PlayerState.ready — use isReady + cued/paused.
-    if (!_hasInitialSeek && !_disposing && !_preparing) {
+    if (!_hasInitialSeek && !_disposing && !_preparing && !_ignoreYoutubeDrive) {
       final state = value.playerState;
       if (state == PlayerState.cued ||
           state == PlayerState.paused ||
@@ -2102,13 +2314,48 @@ class _MotionComparisonViewerState extends State<MotionComparisonViewer> {
         unawaited(_performInitialOriginalSeek());
       }
     }
-    // Never let YouTube auto-drive play state when a recorded clip exists, or
-    // while we are still preparing both controllers into a paused sync.
-    if (!mounted || _hasRecorded || _preparing || _disposing) return;
-    final playing = value.playerState == PlayerState.playing;
-    if (_playing != playing) {
-      setState(() => _playing = playing);
+    if (!mounted || _preparing || _disposing || _ignoreYoutubeDrive) return;
+
+    final state = value.playerState;
+    // Keep local recorded video in lockstep when the user taps YouTube to pan/zoom (pauses).
+    if (state == PlayerState.paused ||
+        state == PlayerState.cued ||
+        state == PlayerState.ended) {
+      if (_playing) {
+        unawaited(_mirrorYoutubePauseToRecorded());
+      }
+      return;
     }
+    if (state == PlayerState.playing) {
+      if (!_playing) {
+        unawaited(_mirrorYoutubePlayToRecorded());
+      }
+    }
+  }
+
+  Future<void> _mirrorYoutubePauseToRecorded() async {
+    try {
+      await widget.recorded?.pause();
+      await _pauseRecordedAudio();
+      await widget.original?.pause();
+    } catch (_) {}
+    _loopTimer?.cancel();
+    _loopTimer = null;
+    _recordedSyncTimer?.cancel();
+    _recordedSyncTimer = null;
+    if (mounted) setState(() => _playing = false);
+  }
+
+  Future<void> _mirrorYoutubePlayToRecorded() async {
+    try {
+      if (_hasRecorded) {
+        await widget.recorded?.play();
+        await _playRecordedAudio();
+      }
+      await widget.original?.play();
+    } catch (_) {}
+    if (_hasRecorded) _startRecordedSync();
+    if (mounted) setState(() => _playing = true);
   }
 
   Future<void> _ensureInitialized(VideoPlayerController? controller) async {
@@ -2534,58 +2781,97 @@ class _MotionComparisonViewerState extends State<MotionComparisonViewer> {
     if (recorded.isNotEmpty && !recorded.contains(index)) return;
     final segment = widget.segments[index];
     setState(() => _segmentIndex = index);
+
+    _ignoreYoutubeDrive = true;
+    _loopTimer?.cancel();
+    _recordedSyncTimer?.cancel();
     try {
-        // ✨ 1. 딜레이 시간 계산
-        final delay = segment.delaySec;
-        final waitTime = Duration(milliseconds: 120 + (delay * 1000));
+      final delay = segment.delaySec;
+      final waitTime = Duration(milliseconds: 120 + (delay * 1000));
+      final start = segment.startSec;
+      final end = segment.endSec > start ? segment.endSec : null;
 
-        // ✨ 2. 탐색(Seek) 전 모든 플레이어 일시정지 (재생 중 넘어가는 것 방지)
-        await widget.original?.pause();
-        await _yt((player) => player.pauseVideo());
-        await widget.recorded?.pause();
-        await _pauseRecordedAudio();
+      await widget.original?.pause();
+      await _yt((player) => player.pauseVideo());
+      await widget.recorded?.pause();
+      await _pauseRecordedAudio();
+      if (mounted) setState(() => _playing = false);
 
-        // --- 기존 속도 설정 및 위치 이동 코드 (그대로 유지) ---
-        await widget.original?.setPlaybackSpeed(segment.speed);
-        await _yt((player) => player.setPlaybackRate(segment.speed));
-        await widget.original?.seekTo(Duration(milliseconds: (segment.startSec * 1000).round()));
-        if (widget.originalYoutube != null) {
-          await _yt(
-            (player) => player.seekTo(seconds: segment.startSec, allowSeekAhead: true),
-          );
-        }
-        
-        if (_hasRecorded) {
-          final marker = _markerForSegment(index);
-          final double recordedTarget;
-          if (marker != null) {
-            recordedTarget = marker.startOffsetMillis / 1000.0;
-          } else {
-            final span = _rangeEnd - _rangeStart;
-            final progress = span > 0 ? ((segment.startSec - _rangeStart) / span).clamp(0.0, 1.0) : 0.0;
-            recordedTarget = progress * _recordedDurationSeconds;
+      await widget.original?.setPlaybackSpeed(segment.speed);
+      await widget.original?.seekTo(Duration(milliseconds: (start * 1000).round()));
+
+      // Force YouTube onto THIS chip's window. Prior cue endSeconds / playhead
+      // from E must not stick when the user taps D (especially identical ranges).
+      if (widget.originalYoutube != null) {
+        final videoId = (widget.youtubeVideoId ??
+                widget.originalYoutube!.metadata.videoId)
+            .trim();
+        try {
+          if (videoId.isNotEmpty) {
+            await _yt(
+              (player) => player.cueVideoById(
+                videoId: videoId,
+                startSeconds: start,
+                endSeconds: end,
+              ),
+            );
           }
-          await widget.recorded?.seekTo(Duration(milliseconds: (recordedTarget * 1000).round()));
-          await _seekRecordedAudio(recordedTarget);
-          if (mounted) setState(() => _position = recordedTarget.clamp(_minPosition, _maxPosition));
-        } else if (mounted) {
-          setState(() => _position = segment.startSec.clamp(_minPosition, _maxPosition));
+        } catch (e) {
+          debugPrint('[LOOPI] comparison cueVideoById ignored: $e');
         }
-        // --------------------------------------------------
-
-        // ✨ 3. 위치 이동을 마친 후 설정된 시간만큼 멈춰서 대기
-        await Future.delayed(waitTime);
-        if (!mounted || _disposing) return;
-
-        // ✨ 4. 대기가 끝난 뒤, 원래 재생 중(_playing) 상태였다면 모두 다시 재생
-        if (_playing) {
-          await widget.original?.play();
-          await _yt((player) => player.playVideo());
-          await widget.recorded?.play();
-          await _playRecordedAudio();
+        try {
+          await _yt((player) => player.setPlaybackRate(segment.speed));
+        } catch (_) {}
+        try {
+          await _yt(
+            (player) => player.seekTo(seconds: start, allowSeekAhead: true),
+          );
+        } catch (e) {
+          debugPrint('[LOOPI] comparison seekTo($start) ignored: $e');
         }
+        debugPrint(
+          '[LOOPI] comparison chip → ${sectionLabelForIndex(index)} '
+          'ytSeek=$start end=$end speed=${segment.speed}',
+        );
+      }
 
-      } catch (_) {}
+      if (_hasRecorded) {
+        final marker = _markerForSegment(index);
+        final double recordedTarget;
+        if (marker != null) {
+          recordedTarget = marker.startOffsetMillis / 1000.0;
+        } else {
+          final span = _rangeEnd - _rangeStart;
+          final progress =
+              span > 0 ? ((start - _rangeStart) / span).clamp(0.0, 1.0) : 0.0;
+          recordedTarget = progress * _recordedDurationSeconds;
+        }
+        await widget.recorded?.seekTo(Duration(milliseconds: (recordedTarget * 1000).round()));
+        await _seekRecordedAudio(recordedTarget);
+        if (mounted) setState(() => _position = recordedTarget.clamp(_minPosition, _maxPosition));
+      } else if (mounted) {
+        setState(() => _position = start.clamp(_minPosition, _maxPosition));
+      }
+
+      await Future<void>.delayed(waitTime);
+      if (!mounted || _disposing) return;
+
+      // Comparison / routine review: chip tap always seeks AND plays.
+      try {
+        await widget.original?.play();
+        await _yt((player) => player.playVideo());
+        await widget.recorded?.play();
+        await _playRecordedAudio();
+      } catch (e) {
+        debugPrint('[LOOPI] comparison auto-play ignored: $e');
+      }
+      if (_hasRecorded) _startRecordedSync();
+      if (mounted) setState(() => _playing = true);
+    } catch (e) {
+      debugPrint('[LOOPI] comparison selectSegment failed: $e');
+    } finally {
+      _ignoreYoutubeDrive = false;
+    }
   }
 
   /// Optional soft highlight sync only — never force-seek every tick (that caused
@@ -2837,7 +3123,11 @@ class _MotionComparisonViewerState extends State<MotionComparisonViewer> {
     final fallbackText = label == '내 동작'
         ? '[가상 녹화 테스트 데이터]\n녹화 영상 프리뷰'
         : '원본 영상을 불러오는 중입니다...';
-    final ratio = customWidget != null ? 16 / 9 : _aspectRatioOf(player);
+    final isOriginalYoutube = customWidget != null;
+    final ratio = isOriginalYoutube
+        ? (widget.originalAspectRatio ?? 16 / 9)
+        : _aspectRatioOf(player);
+    final bg = Theme.of(context).scaffoldBackgroundColor;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -2858,7 +3148,7 @@ class _MotionComparisonViewerState extends State<MotionComparisonViewer> {
         const SizedBox(height: 6),
         Expanded(
           child: ColoredBox(
-            color: Colors.black,
+            color: bg,
             child: InteractiveViewer(
               transformationController: transformController,
               minScale: 1.0,
@@ -2870,7 +3160,7 @@ class _MotionComparisonViewerState extends State<MotionComparisonViewer> {
                         child: Text(
                           fallbackText,
                           textAlign: TextAlign.center,
-                          style: const TextStyle(color: Colors.white70, fontSize: 16, fontWeight: FontWeight.w600),
+                          style: TextStyle(color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.7), fontSize: 16, fontWeight: FontWeight.w600),
                         ),
                       )
                     : AspectRatio(
@@ -2904,6 +3194,7 @@ class MotionComparisonViewerPage extends StatefulWidget {
     this.intervalMarkers = const [],
     this.recordedAudioPath,
     this.recordedSectionIndex,
+    this.originalAspectRatio,
   });
 
   final String title;
@@ -2918,6 +3209,7 @@ class MotionComparisonViewerPage extends StatefulWidget {
   final List<PracticeIntervalMarker> intervalMarkers;
   final String? recordedAudioPath;
   final int? recordedSectionIndex;
+  final double? originalAspectRatio;
 
   @override
   State<MotionComparisonViewerPage> createState() => _MotionComparisonViewerPageState();
@@ -3109,13 +3401,21 @@ class _MotionComparisonViewerPageState extends State<MotionComparisonViewerPage>
           original: widget.original,
           recorded: widget.recorded,
           originalYoutube: _youtube,
-          originalWidget: _youtube == null ? null : loopiYoutubePlayer(controller: _youtube!),
+          originalWidget: _youtube == null
+              ? null
+              : loopiYoutubePlayer(
+                  controller: _youtube!,
+                  aspectRatio: widget.originalAspectRatio ?? 16 / 9,
+                  backgroundColor: Colors.transparent,
+                ),
           segments: widget.segments,
           loopStart: widget.loopStart,
           loopEnd: widget.loopEnd,
           intervalMarkers: widget.intervalMarkers,
           recordedAudioPath: widget.recordedAudioPath,
           recordedSectionIndex: widget.recordedSectionIndex,
+          originalAspectRatio: widget.originalAspectRatio,
+          youtubeVideoId: widget.youtubeVideoId,
         ),
       ),
     );
@@ -3479,12 +3779,23 @@ class _PracticeResultViewerState extends State<PracticeResultViewer> {
           recorded: _recorded,
           segments: safeRoutine.segments,
           originalYoutube: _youtube,
-          originalWidget: _youtube == null ? null : loopiYoutubePlayer(controller: _youtube!),
+          originalWidget: _youtube == null
+              ? null
+              : loopiYoutubePlayer(
+                  controller: _youtube!,
+                  aspectRatio: originalAspectRatioForRoutine(safeRoutine),
+                  backgroundColor: Colors.transparent,
+                ),
           loopStart: _savedLoopRange.start,
           loopEnd: _savedLoopRange.end,
           intervalMarkers: widget.result.intervalMarkers,
           recordedAudioPath: widget.result.isAudioRecording ? widget.result.recordedPath : null,
           recordedSectionIndex: recordedSectionIndex,
+          originalAspectRatio: originalAspectRatioForRoutine(safeRoutine),
+          youtubeVideoId: resolveYoutubeVideoId(
+            videoId: safeRoutine.videoId,
+            videoUrl: safeRoutine.videoUrl,
+          ),
         ),
       ),
     );

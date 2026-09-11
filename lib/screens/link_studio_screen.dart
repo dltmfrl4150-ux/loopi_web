@@ -35,7 +35,7 @@ const double _kStudioVPad = 12;
 const double _kStudioUrlGap = 12;
 const double _kStudioUrlBarHeight = 64;
 const double _kStudioColumnGap = 6;
-const double _kStudioMinSettingsWidth = 240;
+const double _kStudioMinSettingsWidth = 400;
 
 String? _platformFilePath(PlatformFile? file) {
   if (file == null || kIsWeb) return null;
@@ -1201,6 +1201,7 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
     return YoutubePlayerScaffold(
       controller: _youtubePlayer,
       aspectRatio: _isVerticalMedia ? 9 / 16 : 16 / 9,
+      backgroundColor: Colors.transparent,
       builder: (context, player) {
         return _buildMainScaffold(
           testing: testing,
@@ -1208,7 +1209,7 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
               ? Center(
                   child: Text(
                     'studio.player_placeholder'.tr(),
-                    style: const TextStyle(color: Colors.white70),
+                    style: TextStyle(color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.7)),
                   ),
                 )
               : player,
@@ -1416,7 +1417,7 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
         fit: StackFit.expand,
         children: [
           ColoredBox(
-            color: Colors.black,
+            color: Theme.of(context).scaffoldBackgroundColor,
             child: Transform.flip(
               flipX: _isMirrored ?? false,
               child: mediaWidget,
@@ -1845,7 +1846,11 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
                         scrollDirection: Axis.horizontal,
                         primary: false,
                         child: ConstrainedBox(
-                          constraints: BoxConstraints(minWidth: tableConstraints.maxWidth),
+                          constraints: BoxConstraints(
+                            minWidth: tableConstraints.maxWidth < 560
+                                ? 560
+                                : tableConstraints.maxWidth,
+                          ),
                           child: table,
                         ),
                       ),
