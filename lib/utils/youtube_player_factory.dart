@@ -41,9 +41,11 @@ void installYoutubeInteropErrorGuard() {
 /// Home keeps Studio in an [IndexedStack], so the same controller (and iframe
 /// cache) survives tab switches. Use [loopiYoutubePlayer] (`keepAlive: true`)
 /// for players that may go offstage inside a scrollable or tab view.
+/// Keeps native controls/logo visible (YouTube API ToS — no opaque chrome overlays).
 YoutubePlayerParams loopiYoutubeParams({bool showControls = true}) {
   return YoutubePlayerParams(
     mute: false,
+    // Required for ToS: do not hide native controls.
     showControls: showControls,
     showFullscreenButton: true,
     loop: false,

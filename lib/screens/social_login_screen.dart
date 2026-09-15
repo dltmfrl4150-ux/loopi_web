@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:easy_localization/easy_localization.dart';
 
@@ -6,6 +8,8 @@ import '../state/routine_library.dart';
 import '../state/user_state.dart';
 import '../theme/loopi_colors.dart';
 import '../widgets/app_logo.dart';
+import '../widgets/privacy_notice.dart';
+import '../utils/privacy_prefs.dart';
 import 'home_dashboard_screen.dart';
 
 class SocialLoginScreen extends StatefulWidget {
@@ -35,6 +39,7 @@ class _SocialLoginScreenState extends State<SocialLoginScreen> {
   bool _loading = false;
   AuthProviderKind? _busyProvider;
   String? _error;
+  bool _privacyAgreed = false;
 
   Future<void> _runAuth(
     AuthProviderKind kind,
@@ -42,6 +47,11 @@ class _SocialLoginScreenState extends State<SocialLoginScreen> {
     bool allowLocalGuestFallback = false,
   }) async {
     if (_loading) return;
+    if (!_privacyAgreed) {
+      setState(() => _error = 'privacy.login_checkbox'.tr());
+      return;
+    }
+    unawaited(setPrivacyAcknowledged());
     setState(() {
       _loading = true;
       _busyProvider = kind;
@@ -187,12 +197,18 @@ class _SocialLoginScreenState extends State<SocialLoginScreen> {
                         ? null
                         : () => _runAuth(AuthProviderKind.apple, _auth.signInWithApple),
                   ),
-                  const SizedBox(height: 24),
-                  Text(
-                    'social_login.terms_agreement'.tr(),
-                    textAlign: TextAlign.center,
-                    style: TextStyle(color: textMuted, fontSize: 11),
+                  const SizedBox(height: 20),
+                  PrivacyAgreementCheckbox(
+                    value: _privacyAgreed,
+                    onChanged: _loading
+                        ? null
+                        : (v) => setState(() {
+                              _privacyAgreed = v ?? false;
+                              if (_privacyAgreed) _error = null;
+                            }),
                   ),
+                  const SizedBox(height: 8),
+                  const PrivacyDisclaimerText(fontSize: 11),
                 ],
               ),
             ),

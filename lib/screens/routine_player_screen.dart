@@ -1,3 +1,4 @@
+import 'package:easy_localization/easy_localization.dart';
 import 'package:flutter/material.dart';
 
 import '../models/routine_models.dart';
@@ -62,7 +63,7 @@ class _RoutinePlayerScreenState extends State<RoutinePlayerScreen> {
             padding: const EdgeInsets.only(right: 8),
             child: FilledButton.icon(
               icon: const Icon(Icons.fitness_center, size: 18),
-              label: const Text('연습하기'),
+              label: Text('player.practice'.tr()),
               onPressed: _openPractice,
             ),
           ),

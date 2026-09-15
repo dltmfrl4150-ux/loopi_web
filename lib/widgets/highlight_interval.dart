@@ -1,7 +1,4 @@
-import 'package:easy_localization/easy_localization.dart';
 import 'package:flutter/material.dart';
-
-import '../theme/loopi_colors.dart';
 
 const Color kHighlightGold = Color(0xFFFFC107);
 const Color kHighlightPink = Color(0xFFFF1493);
@@ -49,21 +46,8 @@ class ChorusContainsBadge extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      padding: EdgeInsets.symmetric(horizontal: compact ? 6 : 8, vertical: compact ? 2 : 3),
-      decoration: BoxDecoration(
-        color: kHighlightGold.withValues(alpha: 0.16),
-        borderRadius: BorderRadius.circular(999),
-        border: Border.all(color: kHighlightGold.withValues(alpha: 0.7)),
-      ),
-      child: Text(
-        'common.contains_chorus'.tr(),
-        style: TextStyle(
-          color: LoopiColors.deepPurple,
-          fontSize: compact ? 10 : 11,
-          fontWeight: FontWeight.w700,
-        ),
-      ),
-    );
+    // Visual badge retired from list cards; keep widget for compatibility.
+    // Underlying isHighlight / hasHighlight data and logic are unchanged.
+    return const SizedBox.shrink();
   }
 }

@@ -19,8 +19,9 @@ import '../widgets/app_logo.dart';
 import '../widgets/cached_remote_image.dart';
 import '../widgets/favorite_icon_button.dart';
 import '../widgets/category_filter_chips.dart';
-import '../widgets/highlight_interval.dart';
 import '../widgets/shell_close_scope.dart';
+import '../widgets/storage_quota_nudge.dart';
+import '../widgets/privacy_notice.dart';
 import 'community_screen.dart';
 import 'link_studio_screen.dart';
 import 'my_profile_screen.dart';
@@ -86,7 +87,24 @@ class _HomeDashboardScreenState extends State<HomeDashboardScreen> {
   final ValueNotifier<int> _communityRefreshTick = ValueNotifier<int>(0);
 
   @override
+  void initState() {
+    super.initState();
+    widget.library.addListener(_onLibraryChanged);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      unawaited(maybeShowPrivacyNoticeDialog(context));
+    });
+  }
+
+  void _onLibraryChanged() {
+    if (!mounted) return;
+    if (!widget.library.consumeStorageQuotaWarning()) return;
+    showStorageQuotaNudge(context);
+  }
+
+  @override
   void dispose() {
+    widget.library.removeListener(_onLibraryChanged);
     _communityRefreshTick.dispose();
     super.dispose();
   }
@@ -345,9 +363,13 @@ class _HomeDashboardScreenState extends State<HomeDashboardScreen> {
         elevation: 0,
         backgroundColor: Colors.transparent,
         titleSpacing: 16,
-        title: const Align(
+        title: Align(
           alignment: Alignment.centerLeft,
-          child: AppLogo(height: 30),
+          child: Semantics(
+            // POC: AppBar exposes a localized label (Home / 홈).
+            label: 'home.tab_home'.tr(),
+            child: const AppLogo(height: 30),
+          ),
         ),
         actions: [
           IconButton(
@@ -484,6 +506,8 @@ class _HomeTab extends StatelessWidget {
             fontWeight: FontWeight.w800,
           ),
         ),
+        const SizedBox(height: 10),
+        const PrivacyDisclaimerText(fontSize: 11, textAlign: TextAlign.start),
         const SizedBox(height: 20),
         const _AnnouncementBanner(),
         const SizedBox(height: 20),
@@ -605,7 +629,7 @@ class _AnnouncementBannerState extends State<_AnnouncementBanner> {
               gradient: LinearGradient(
                 colors: [
                   LoopiColors.purple.withValues(alpha: 0.12),
-                  kHighlightPink.withValues(alpha: 0.08),
+                  LoopiColors.purpleDark.withValues(alpha: 0.08),
                 ],
                 begin: Alignment.centerLeft,
                 end: Alignment.centerRight,
@@ -921,10 +945,6 @@ class _RoutineCard extends StatelessWidget {
                     rangeLabel,
                     style: TextStyle(color: scheme.onSurfaceVariant, fontSize: 12),
                   ),
-                  if (routine.hasHighlight) ...[
-                    const SizedBox(height: 6),
-                    const ChorusContainsBadge(compact: true),
-                  ],
                 ],
               ),
             ),
@@ -957,7 +977,7 @@ class _RoutineCard extends StatelessWidget {
                       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
                       visualDensity: VisualDensity.compact,
                     ),
-                    child: const Text('Play'),
+                    child: Text('player.play'.tr()),
                   ),
                   if (onPractice != null) ...[
                     const SizedBox(width: 4),
@@ -968,7 +988,7 @@ class _RoutineCard extends StatelessWidget {
                         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
                         visualDensity: VisualDensity.compact,
                       ),
-                      child: const Text('Practice'),
+                      child: Text('player.practice'.tr()),
                     ),
                   ],
                 ],
@@ -1210,7 +1230,7 @@ class _LibraryTabState extends State<_LibraryTab> with SingleTickerProviderState
             ),
             CategoryFilterBar(
               selected: _category,
-              padding: const EdgeInsets.fromLTRB(24, 0, 24, 8),
+              padding: const EdgeInsets.fromLTRB(24, 4, 24, 10),
               onSelected: (value) {
                 if (_category == value) return;
                 setState(() {
@@ -1399,7 +1419,12 @@ class _LibraryTabState extends State<_LibraryTab> with SingleTickerProviderState
                               }
                               try {
                                 widget.onOpenPracticeView(
-                                  PracticeResultViewer(routine: routine, result: result),
+                                  PracticeResultViewer(
+                                    routine: routine,
+                                    result: result,
+                                    sectionTakesByIndex: widget.library
+                                        .latestPracticeTakesBySection(routine.id),
+                                  ),
                                 );
                               } catch (error) {
                                 ScaffoldMessenger.of(context).showSnackBar(
@@ -1603,21 +1628,17 @@ class CommunityFeedScreen extends StatelessWidget {
                   margin: const EdgeInsets.only(bottom: 12),
                   child: ListTile(
                     onTap: () => _play(context, routine),
-                    leading: IconButton(
-                      onPressed: () => _play(context, routine),
-                      tooltip: 'player.play'.tr(),
-                      icon: const Icon(Icons.play_circle_fill, size: 34),
-                    ),
+                    leading: _CommunityFeedThumb(routine: routine),
                     title: Text(routine.name),
                     subtitle: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
+                        Text(post.description.isEmpty ? 'community.no_description'.tr() : post.description),
                         TextButton(
                           onPressed: () => _openProfile(context, post),
                           style: TextButton.styleFrom(padding: EdgeInsets.zero),
                           child: Text('@${post.authorName}'),
                         ),
-                        Text(post.description.isEmpty ? 'community.no_description'.tr() : post.description),
                       ],
                     ),
                     trailing: FavoriteButton(
@@ -1629,6 +1650,54 @@ class CommunityFeedScreen extends StatelessWidget {
               },
         );
       },
+    );
+  }
+}
+
+class _CommunityFeedThumb extends StatelessWidget {
+  const _CommunityFeedThumb({required this.routine});
+
+  final SavedRoutine routine;
+
+  @override
+  Widget build(BuildContext context) {
+    const size = 50.0;
+    final ytUrl = routine.sourceType == SourceType.youtube
+        ? (youtubeThumbnailUrl(routine.videoId) ?? youtubeThumbnailUrl(routine.videoUrl))
+        : null;
+    if (ytUrl != null) {
+      return ClipRRect(
+        borderRadius: BorderRadius.circular(10),
+        child: SizedBox(
+          width: size,
+          height: size,
+          child: CachedRemoteImage(
+            url: ytUrl,
+            fit: BoxFit.cover,
+            placeholder: _iconBox(Icons.play_circle_outline, LoopiColors.purple, size),
+          ),
+        ),
+      );
+    }
+    switch (routine.sourceType) {
+      case SourceType.audio:
+        return _iconBox(Icons.audiotrack_rounded, LoopiColors.deepPurple, size);
+      case SourceType.localVideo:
+        return _iconBox(Icons.movie_outlined, LoopiColors.purple, size);
+      case SourceType.youtube:
+        return _iconBox(Icons.play_circle_outline, LoopiColors.purple, size);
+    }
+  }
+
+  Widget _iconBox(IconData icon, Color accent, double size) {
+    return Container(
+      width: size,
+      height: size,
+      decoration: BoxDecoration(
+        color: accent.withValues(alpha: 0.14),
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Icon(icon, color: accent, size: 26),
     );
   }
 }

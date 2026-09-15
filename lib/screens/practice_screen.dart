@@ -18,15 +18,22 @@ import '../state/shadowing_sequence_controller.dart';
 import '../theme/loopi_colors.dart';
 import '../utils/time_format.dart';
 import '../utils/media_blob.dart';
+import '../utils/camera_release.dart';
 import '../utils/cached_video.dart';
 import '../services/storage_service.dart';
 import '../utils/media_limits.dart';
 import '../utils/youtube_player_factory.dart';
 import '../widgets/highlight_interval.dart';
 import '../widgets/shell_close_scope.dart';
+import '../widgets/comparison_export.dart';
+import '../widgets/storage_quota_nudge.dart';
+import '../utils/storage_quota.dart';
 
 SavedRoutine sanitizeRoutineForPractice(SavedRoutine routine) {
-  final videoId = resolveYoutubeVideoId(videoId: routine.videoId, videoUrl: routine.videoUrl) ?? '';
+  final isYoutube = routine.sourceType == SourceType.youtube;
+  final videoId = isYoutube
+      ? (resolveYoutubeVideoId(videoId: routine.videoId, videoUrl: routine.videoUrl) ?? '')
+      : '';
   // TRUST author timestamps completely — including identical overlapping windows
   // used for speed-ramp practice (A–E all 0–15s at different speeds).
   // Never invent, heal, or evenly split section ranges.
@@ -44,7 +51,7 @@ SavedRoutine sanitizeRoutineForPractice(SavedRoutine routine) {
   return SavedRoutine(
     id: routine.id,
     name: routine.name.trim().isEmpty ? 'Routine' : routine.name,
-    videoUrl: routine.videoUrl,
+    videoUrl: isYoutube ? routine.videoUrl : '',
     videoId: videoId,
     segments: segments.isNotEmpty
         ? segments
@@ -233,6 +240,11 @@ class _VideoPracticeScreenState extends State<VideoPracticeScreen> {
   final AudioRecorder _recorder = AudioRecorder();
   bool _countingDown = false;
   String _countdownLabel = '';
+  /// Blocks boundary listener while A→B seek/delay/play is in flight.
+  /// Prevents duplicate countdowns that fight over UI state.
+  bool _isTransitioning = false;
+  /// Only one section-delay countdown may run at a time.
+  bool _sectionDelayInFlight = false;
 
   // A -> B segment engine state used while recording/virtual-recording so the
   // original video plays through every routine segment sequentially, honoring
@@ -637,6 +649,8 @@ class _VideoPracticeScreenState extends State<VideoPracticeScreen> {
       );
       _engineAdvancing = false;
       _engineSeeking = false;
+      _isTransitioning = false;
+      _sectionDelayInFlight = false;
       _cancelEngineListeners();
       _stopInProgress = false;
       _processingSave = false;
@@ -652,6 +666,8 @@ class _VideoPracticeScreenState extends State<VideoPracticeScreen> {
       // Kill polls first so no further YT queries race the stop path.
       _engineAdvancing = false;
       _engineSeeking = false;
+      _isTransitioning = false;
+      _sectionDelayInFlight = false;
       _stopAmplitudeMonitor();
       _stopSegmentEngine();
       // Offline snapshot only — no YouTube API.
@@ -866,22 +882,38 @@ class _VideoPracticeScreenState extends State<VideoPracticeScreen> {
     return configured > 0 ? configured : 3;
   }
 
-  /// Shows a full-screen 3-2-1-START countdown before recording/playback begins.
-  Future<void> _runCountdown() async {
-    if (_countingDown || !mounted) return;
-    setState(() {
-      _countingDown = true;
-      _countdownLabel = '$_recordingDelaySeconds';
-    });
-    for (var i = _recordingDelaySeconds; i >= 1; i--) {
-      if (!mounted) return;
-      setState(() => _countdownLabel = '$i');
+  /// Shows a full-screen N-…-1-START countdown (pre-record or section delay).
+  /// Returns false if another countdown already owns the UI (caller must not play).
+  Future<bool> _runCountdown({int? seconds}) async {
+    if (!mounted) return false;
+    // Synchronous guard — must run before any await to stop concurrent callers.
+    if (_countingDown) return false;
+    final total = seconds ?? _recordingDelaySeconds;
+    if (total <= 0) return true;
+    _countingDown = true;
+    _countdownLabel = '$total';
+    if (mounted) setState(() {});
+    for (var i = total; i >= 1; i--) {
+      if (!mounted || _stopInProgress || _disposing) {
+        _countingDown = false;
+        if (mounted) setState(() {});
+        return false;
+      }
+      _countdownLabel = '$i';
+      if (mounted) setState(() {});
       await Future.delayed(const Duration(seconds: 1));
     }
-    if (!mounted) return;
-    setState(() => _countdownLabel = 'START!');
+    if (!mounted || _stopInProgress || _disposing) {
+      _countingDown = false;
+      if (mounted) setState(() {});
+      return false;
+    }
+    _countdownLabel = 'START!';
+    if (mounted) setState(() {});
     await Future.delayed(const Duration(milliseconds: 500));
-    if (mounted) setState(() => _countingDown = false);
+    _countingDown = false;
+    if (mounted) setState(() {});
+    return true;
   }
 
   bool get _isPracticeRecordingActive =>
@@ -1053,6 +1085,8 @@ class _VideoPracticeScreenState extends State<VideoPracticeScreen> {
     _engineActive = true;
     _engineAdvancing = false;
     _engineSeeking = false;
+    _isTransitioning = false;
+    _sectionDelayInFlight = false;
     _engineOnFinished = onFinished;
     _cancelEngineListeners();
 
@@ -1084,7 +1118,8 @@ class _VideoPracticeScreenState extends State<VideoPracticeScreen> {
     if (mounted) setState(() {});
     // Warm media duration so Shorts with endSec>duration can still advance.
     unawaited(_engineVideoDuration());
-    await _playEngineSegment(startIndex, epoch: epoch);
+    // Pre-record countdown already consumed the first section's delay.
+    await _playEngineSegment(startIndex, epoch: epoch, respectDelay: false);
   }
 
   Future<void> _playEngineSegment(
@@ -1093,6 +1128,7 @@ class _VideoPracticeScreenState extends State<VideoPracticeScreen> {
     bool resetPlays = true,
     bool previewOnly = false,
     bool fromUserSelection = false,
+    bool respectDelay = true,
   }) async {
     final token = epoch ?? _engineEpoch;
     if (index < 0 || index >= widget.routine.segments.length) return;
@@ -1107,6 +1143,7 @@ class _VideoPracticeScreenState extends State<VideoPracticeScreen> {
     }
 
     if (!previewOnly) {
+      _isTransitioning = true;
       _engineAdvancing = true;
       _engineSeeking = true;
       _cancelEngineListeners();
@@ -1135,8 +1172,76 @@ class _VideoPracticeScreenState extends State<VideoPracticeScreen> {
       return;
     }
 
+    // Section delay: hold on start frame, run prep countdown, then play.
+    final delaySec = respectDelay ? segment.delaySec : 0;
+    if (delaySec > 0) {
+      // Only one delay countdown may run — duplicates skip entirely (no play).
+      if (_sectionDelayInFlight) {
+        debugPrint(
+          '[LOOPI] skip duplicate section delay for '
+          '${sectionLabelForIndex(index)}',
+        );
+        return;
+      }
+      _sectionDelayInFlight = true;
+      unawaited(_playEngineSegmentAfterDelay(segment, delaySec: delaySec, token: token));
+      return;
+    }
+
     // Recording progression: never block the engine poll on hung YouTube seeks.
     unawaited(_seekEngineMedia(segment, play: true, token: token));
+  }
+
+  /// Seek+pause → section delay countdown → play. Camera recording keeps running.
+  Future<void> _playEngineSegmentAfterDelay(
+    RoutineSegment segment, {
+    required int delaySec,
+    required int token,
+  }) async {
+    try {
+      // Hold the start frame; keep transitioning locked so the poll cannot
+      // re-fire A→B and spawn another countdown.
+      _isTransitioning = true;
+      _engineAdvancing = true;
+      _engineSeeking = true;
+      _cancelEngineListeners();
+
+      await _seekEngineMedia(segment, play: false);
+      if (!_engineSessionLive || token != _engineEpoch || _stopInProgress) {
+        return;
+      }
+
+      debugPrint(
+        '[LOOPI] section delay ${delaySec}s before '
+        '${sectionLabelForIndex(_engineSegmentIndex)} play',
+      );
+      final countdownOk = await _runCountdown(seconds: delaySec);
+      if (!countdownOk ||
+          !_engineSessionLive ||
+          token != _engineEpoch ||
+          _stopInProgress ||
+          !mounted) {
+        return;
+      }
+
+      // Delay wall-time must not count as section playback progress.
+      _markEngineSegmentAnchor(segment.startSec, segment.speed);
+      await _seekEngineMedia(segment, play: true, token: token);
+    } catch (e) {
+      debugPrint('[LOOPI] delayed section start failed: $e');
+    } finally {
+      _sectionDelayInFlight = false;
+      _isTransitioning = false;
+      // Aborted before play: unlock and re-arm. Successful play already cleared
+      // seeking/advancing and armed the poll inside [_seekEngineMedia].
+      if (_engineSeeking || _engineAdvancing) {
+        _engineSeeking = false;
+        _engineAdvancing = false;
+        if (token == _engineEpoch && _engineSessionLive && !_stopInProgress) {
+          _armEnginePoll(token);
+        }
+      }
+    }
   }
 
   /// Seek/rate (and optionally play) without stalling the recording timer loop.
@@ -1192,6 +1297,7 @@ class _VideoPracticeScreenState extends State<VideoPracticeScreen> {
       if (play) {
         _engineSeeking = false;
         _engineAdvancing = false;
+        _isTransitioning = false;
         if (token != null && token == _engineEpoch && _engineSessionLive) {
           _armEnginePoll(token);
         }
@@ -1293,7 +1399,13 @@ class _VideoPracticeScreenState extends State<VideoPracticeScreen> {
   }
 
   Future<void> _engineTick(int token) async {
-    if (!_engineSessionLive || token != _engineEpoch || _engineSeeking || _engineAdvancing) {
+    if (!_engineSessionLive ||
+        token != _engineEpoch ||
+        _engineSeeking ||
+        _engineAdvancing ||
+        _isTransitioning ||
+        _sectionDelayInFlight ||
+        _countingDown) {
       return;
     }
     double? time;
@@ -1307,7 +1419,13 @@ class _VideoPracticeScreenState extends State<VideoPracticeScreen> {
       time = null;
     }
     time ??= _estimateEngineTime();
-    if (!_engineSessionLive || token != _engineEpoch || _engineSeeking || _engineAdvancing) {
+    if (!_engineSessionLive ||
+        token != _engineEpoch ||
+        _engineSeeking ||
+        _engineAdvancing ||
+        _isTransitioning ||
+        _sectionDelayInFlight ||
+        _countingDown) {
       return;
     }
     if (time == null) return;
@@ -1341,7 +1459,13 @@ class _VideoPracticeScreenState extends State<VideoPracticeScreen> {
   }
 
   void _onEngineTime(double time, int token, {double? videoDuration}) {
-    if (!_engineSessionLive || token != _engineEpoch || _engineAdvancing || _engineSeeking) {
+    if (!_engineSessionLive ||
+        token != _engineEpoch ||
+        _engineAdvancing ||
+        _engineSeeking ||
+        _isTransitioning ||
+        _sectionDelayInFlight ||
+        _countingDown) {
       return;
     }
     if (!_recording && !_virtualRecording && !_audioRecording) return;
@@ -1359,15 +1483,18 @@ class _VideoPracticeScreenState extends State<VideoPracticeScreen> {
     if (time < segment.startSec - 1.0 && _engineSegmentIndex > 0) return;
     if (!atMediaEof && time + 0.15 < effectiveEnd) return;
 
+    // Lock IMMEDIATELY so concurrent ticks cannot spawn duplicate delays.
+    _isTransitioning = true;
+    _engineAdvancing = true;
+    _engineSeeking = true;
+    _cancelEngineListeners();
+
     if (atMediaEof || (effectiveEnd - segment.endSec).abs() > 0.2) {
       debugPrint(
         '[LOOPI] section end capped rawEnd=${segment.endSec} '
         'effectiveEnd=$effectiveEnd duration=$videoDuration time=$time',
       );
     }
-
-    _engineAdvancing = true;
-    _cancelEngineListeners();
 
     final targetLoops = segment.loopCount <= 0 && segment.loopCount != kInfiniteLoop
         ? 1
@@ -1379,65 +1506,22 @@ class _VideoPracticeScreenState extends State<VideoPracticeScreen> {
 
     _engineLoopsCompleted += 1;
     if (_engineLoopsCompleted < targetLoops) {
-      // Still looping this section — seek back to start. Keep recording.
+      // Still looping THIS section only — seek back to start. Keep recording.
       unawaited(_playEngineSegment(_engineSegmentIndex, epoch: token, resetPlays: false));
       return;
     }
 
-    // Loops complete — advance to the next section (D → E).
-    final next = _engineSegmentIndex + 1;
-    if (next < segments.length) {
-      final nextSeg = segments[next];
-      final prevSeg = segment;
-      _engineSegmentIndex = next;
-      _userSelectedSegmentIndex = next;
-      _engineLoopsCompleted = 0;
-      final startIdx = (_recordStartSegmentIndex ?? 0).clamp(0, segments.length - 1);
-      final rangeStart = segments[startIdx].startSec;
-      final nextEffectiveEnd = _effectiveSectionEnd(nextSeg, videoDuration);
-      final rangeEnd = nextEffectiveEnd > rangeStart ? nextEffectiveEnd : rangeStart + 0.5;
-      _lockedSaveRange = (start: rangeStart, end: rangeEnd);
-      _captureOriginalEnd = rangeEnd;
-      _logIntervalTransition(next);
-      if (mounted) setState(() {});
-      debugPrint(
-        '[LOOPI] advance recording section → ${sectionLabelForIndex(next)} '
-        'idx=$next startSec=${nextSeg.startSec} endSec=${nextSeg.endSec} '
-        'effectiveEnd=$nextEffectiveEnd speed=${nextSeg.speed} atTime=$time',
-      );
-      // Identical / overlapping windows (speed-ramp): seek back to start with
-      // the next section's speed. Contiguous non-overlapping: continue natively.
-      final sameWindow = (nextSeg.startSec - prevSeg.startSec).abs() < 0.05 &&
-          (nextSeg.endSec - prevSeg.endSec).abs() < 0.05;
-      final needsSeekToStart =
-          sameWindow || atMediaEof || time + 0.35 < nextSeg.startSec;
-      if (needsSeekToStart) {
-        unawaited(_playEngineSegment(next, epoch: token, resetPlays: true));
-        return;
-      }
-      _markEngineSegmentAnchor(time, nextSeg.speed);
-      unawaited(() async {
-        try {
-          await _original?.setPlaybackSpeed(nextSeg.speed);
-        } catch (_) {}
-        try {
-          await _yt((player) => player.setPlaybackRate(nextSeg.speed))
-              .timeout(const Duration(seconds: 2), onTimeout: () => null);
-        } catch (e) {
-          debugPrint('Ignored YouTube interop error to keep listener alive: $e');
-        }
-        if (token == _engineEpoch) {
-          _engineSeeking = false;
-          _engineAdvancing = false;
-          _armEnginePoll(token);
-        }
-      }());
-      return;
-    }
-
-    // Last section finished — safe auto-stop.
+    // Single-section practice: section finished → pause original and stop recorder.
+    // Do NOT auto-advance to the next section or start its delay countdown.
+    debugPrint(
+      '[LOOPI] single-section complete '
+      '${sectionLabelForIndex(_engineSegmentIndex)} — pause + stop recording',
+    );
     _engineActive = false;
     _engineAdvancing = false;
+    _engineSeeking = false;
+    _isTransitioning = false;
+    _sectionDelayInFlight = false;
     final finished = _engineOnFinished;
     _engineOnFinished = null;
     unawaited(_haltOriginalPlayback());
@@ -1451,6 +1535,9 @@ class _VideoPracticeScreenState extends State<VideoPracticeScreen> {
     _engineActive = false;
     _engineAdvancing = false;
     _engineSeeking = false;
+    _isTransitioning = false;
+    _sectionDelayInFlight = false;
+    _countingDown = false;
     _engineOnFinished = null;
     _cancelEngineListeners();
     _stopAmplitudeMonitor();
@@ -1570,15 +1657,14 @@ class _VideoPracticeScreenState extends State<VideoPracticeScreen> {
         _lockPracticeSaveRange();
       }
       final range = _savedCaptureRange();
+      final sectionIndex = (_recordStartSegmentIndex ?? _userSelectedSegmentIndex)
+          .clamp(0, widget.routine.segments.isEmpty ? 0 : widget.routine.segments.length - 1);
       debugPrint(
         '[LOOPI] saving practice startTime=${range.start} endTime=${range.end} '
-        'section=${sectionLabelForIndex(_recordStartSegmentIndex ?? _userSelectedSegmentIndex)}',
+        'section=${sectionLabelForIndex(sectionIndex)}',
       );
       final playbackRate = widget.routine.segments.isNotEmpty
-          ? widget.routine.segments[
-                  (_recordStartSegmentIndex ?? _userSelectedSegmentIndex)
-                      .clamp(0, widget.routine.segments.length - 1)]
-              .speed
+          ? widget.routine.segments[sectionIndex].speed
           : 1.0;
       // Prefer path-based playback. Reading the full blob here freezes the UI for
       // large takes; bytes can be loaded lazily later for community upload.
@@ -1595,20 +1681,29 @@ class _VideoPracticeScreenState extends State<VideoPracticeScreen> {
         category: widget.routine.category,
         intervalMarkers: List<PracticeIntervalMarker>.from(_intervalMarkers),
         isAudioRecording: isAudioRecording,
+        recordedSectionIndex: sectionIndex,
       ));
       if (!mounted) return;
       await _navigateToComparisonPage(
         title: name,
         recordedAudioPath: isAudioRecording ? recordedPath : null,
+        recordedMediaPath: recordedPath,
         loopStart: range.start,
         loopEnd: range.end,
+        recordedSectionIndex: sectionIndex,
       );
+    } on StorageQuotaExceededException {
+      if (mounted) await showStorageQuotaNudge(context);
     } catch (error, stack) {
       debugPrint('save practice failed: $error\n$stack');
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('저장에 실패했습니다. 다시 시도해 주세요.')),
-        );
+        if (StorageQuotaExceededException.matches(error)) {
+          await showStorageQuotaNudge(context);
+        } else {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('저장에 실패했습니다. 다시 시도해 주세요.')),
+          );
+        }
       }
     } finally {
       await _endStopProcessing();
@@ -1621,8 +1716,10 @@ class _VideoPracticeScreenState extends State<VideoPracticeScreen> {
   Future<void> _navigateToComparisonPage({
     String? title,
     String? recordedAudioPath,
+    String? recordedMediaPath,
     double? loopStart,
     double? loopEnd,
+    int? recordedSectionIndex,
   }) async {
     if (!mounted) return;
     final original = _original;
@@ -1637,25 +1734,34 @@ class _VideoPracticeScreenState extends State<VideoPracticeScreen> {
         await recorded?.pause();
         await safeYoutubePlayerCallOn(youtube, (player) => player.pauseVideo());
       } catch (_) {}
-      final youtubeVideoId = resolveYoutubeVideoId(
-        videoId: widget.routine.videoId,
-        videoUrl: widget.routine.videoUrl,
-      );
-      if (youtubeVideoId != null) {
-        await closeYoutubePlayerSafely(youtube);
-      }
+      final youtubeVideoId = widget.routine.sourceType == SourceType.youtube
+          ? resolveYoutubeVideoId(
+              videoId: widget.routine.videoId,
+              videoUrl: widget.routine.videoUrl,
+            )
+          : null;
+      // Local/mp4 originals must keep their VideoPlayerController — never replace
+      // with a YouTube iframe (stale studio default IDs like M7lc1UVf-VE).
+      await closeYoutubePlayerSafely(youtube);
       final segments = widget.routine.segments;
       final range = _savedCaptureRange();
+      final sectionIndex = (recordedSectionIndex ??
+              _recordStartSegmentIndex ??
+              _userSelectedSegmentIndex)
+          .clamp(0, segments.isEmpty ? 0 : segments.length - 1);
       final savedStart = loopStart ?? range.start;
       final savedEnd = loopEnd ?? range.end;
       final playbackRate = segments.isNotEmpty
-          ? segments[(_recordStartSegmentIndex ?? _userSelectedSegmentIndex).clamp(0, segments.length - 1)].speed
+          ? segments[sectionIndex].speed
           : 1.0;
-      final recordedSectionIndex =
-          (_recordStartSegmentIndex ?? _userSelectedSegmentIndex).clamp(0, segments.isEmpty ? 0 : segments.length - 1);
+      final sectionTakes =
+          widget.library.latestPracticeTakesBySection(widget.routine.id);
       debugPrint(
-        '[LOOPI] open comparison loopStart=$savedStart loopEnd=$savedEnd '
-        'recordedSection=${sectionLabelForIndex(recordedSectionIndex)}',
+        '[LOOPI] open comparison source=${widget.routine.sourceType.name} '
+        'ytId=$youtubeVideoId hasLocalOriginal=${original != null} '
+        'loopStart=$savedStart loopEnd=$savedEnd '
+        'recordedSection=${sectionLabelForIndex(sectionIndex)} '
+        'sectionTakes=${sectionTakes.keys.map(sectionLabelForIndex).join(",")}',
       );
       if (!mounted) {
         // Ownership fell through — dispose locally to avoid leaks.
@@ -1665,23 +1771,27 @@ class _VideoPracticeScreenState extends State<VideoPracticeScreen> {
         try {
           await recorded?.dispose();
         } catch (_) {}
-        unawaited(closeYoutubePlayerSafely(youtubeVideoId == null ? youtube : null));
         return;
       }
       final review = MotionComparisonViewerPage(
         title: title ?? widget.routine.name,
         original: original,
         recorded: recorded,
-        originalYoutube: youtubeVideoId == null ? youtube : null,
+        originalYoutube: null,
         youtubeVideoId: youtubeVideoId,
+        sourceType: widget.routine.sourceType,
         segments: segments,
         loopStart: savedStart,
         loopEnd: savedEnd,
         playbackRate: playbackRate,
         intervalMarkers: List<PracticeIntervalMarker>.from(_intervalMarkers),
         recordedAudioPath: recordedAudioPath,
-        recordedSectionIndex: recordedSectionIndex,
+        recordedSectionIndex: sectionIndex,
+        sectionTakesByIndex: sectionTakes,
         originalAspectRatio: originalAspectRatioForRoutine(widget.routine),
+        recordedMediaPath: recordedMediaPath ??
+            recordedAudioPath ??
+            sectionTakes[sectionIndex]?.recordedPath,
       );
       final openInShell = widget.onOpenInShell;
       if (openInShell != null) {
@@ -1764,9 +1874,11 @@ class _VideoPracticeScreenState extends State<VideoPracticeScreen> {
     _maxRecordingTimer?.cancel();
     _recordingTimer?.cancel();
     _syncTimer?.cancel();
-    try {
-      _camera?.dispose();
-    } catch (_) {}
+    // Strict camera release: await dispose + stop leftover MediaStreamTracks
+    // so the browser camera indicator turns off immediately.
+    final camera = _camera;
+    _camera = null;
+    unawaited(releaseCameraController(camera));
     try {
       _original?.dispose();
     } catch (_) {}
@@ -1775,6 +1887,7 @@ class _VideoPracticeScreenState extends State<VideoPracticeScreen> {
     } catch (_) {}
     unawaited(closeYoutubePlayerSafely(_youtubeOriginal));
     revokeMediaBlobUrl(_originalObjectUrl);
+    _originalObjectUrl = null;
     // Do not dispose the AudioRecorder while a stop() may still be settling on web;
     // schedule after microtask so MediaRecorder tracks can finish releasing.
     final recorder = _recorder;
@@ -1782,6 +1895,8 @@ class _VideoPracticeScreenState extends State<VideoPracticeScreen> {
       try {
         recorder.dispose();
       } catch (_) {}
+      // Extra pass after recorder teardown for any lingering getUserMedia tracks.
+      stopOrphanedCameraMediaTracks();
     });
     super.dispose();
   }
@@ -1799,8 +1914,9 @@ class _VideoPracticeScreenState extends State<VideoPracticeScreen> {
       floatingActionButtonLocation: FloatingActionButtonLocation.centerFloat,
         floatingActionButton: !_loading && _error == null
           ? FloatingActionButton(
-            // While recording, Stop must always be tappable (ignore stuck flags).
-            onPressed: _countingDown
+            // Pre-record countdown disables FAB; mid-record section delay must
+            // still allow Stop.
+            onPressed: (_countingDown && !_isPracticeRecordingActive)
                 ? null
                 : (_recording || _virtualRecording || _audioRecording)
                     ? () => unawaited(_handleStopPressed())
@@ -1862,31 +1978,50 @@ class _VideoPracticeScreenState extends State<VideoPracticeScreen> {
                         ),
                       ],
                     ),
+                    // YouTube ToS: do not cover the iframe logo/controls with opaque overlays.
+                    // Status banners sit above the player row instead of Positioned.fill.
                     if (_countingDown)
-                      Positioned.fill(
-                        child: ColoredBox(
-                          color: Colors.black87,
-                          child: Center(
+                      Positioned(
+                        left: 16,
+                        right: 16,
+                        top: 8,
+                        child: Material(
+                          color: Colors.black.withValues(alpha: 0.82),
+                          borderRadius: BorderRadius.circular(12),
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(vertical: 18, horizontal: 12),
                             child: Text(
                               _countdownLabel,
-                              style: const TextStyle(color: Colors.white, fontSize: 96, fontWeight: FontWeight.w900),
+                              textAlign: TextAlign.center,
+                              style: const TextStyle(color: Colors.white, fontSize: 48, fontWeight: FontWeight.w900),
                             ),
                           ),
                         ),
                       ),
                     if (_processingSave)
-                      const Positioned.fill(
-                        child: ColoredBox(
-                          color: Color(0x99000000),
-                          child: Center(
-                            child: Column(
-                              mainAxisSize: MainAxisSize.min,
+                      Positioned(
+                        left: 16,
+                        right: 16,
+                        bottom: 96,
+                        child: Material(
+                          color: const Color(0xE6120F1C),
+                          borderRadius: BorderRadius.circular(12),
+                          child: const Padding(
+                            padding: EdgeInsets.symmetric(vertical: 14, horizontal: 16),
+                            child: Row(
+                              mainAxisAlignment: MainAxisAlignment.center,
                               children: [
-                                CircularProgressIndicator(color: Colors.white),
-                                SizedBox(height: 16),
-                                Text(
-                                  '녹화 파일을 준비하는 중…',
-                                  style: TextStyle(color: Colors.white, fontSize: 15, fontWeight: FontWeight.w600),
+                                SizedBox(
+                                  width: 18,
+                                  height: 18,
+                                  child: CircularProgressIndicator(strokeWidth: 2.2, color: Colors.white),
+                                ),
+                                SizedBox(width: 12),
+                                Flexible(
+                                  child: Text(
+                                    '녹화 파일을 준비하는 중…',
+                                    style: TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w600),
+                                  ),
                                 ),
                               ],
                             ),
@@ -2170,6 +2305,7 @@ class MotionComparisonViewer extends StatefulWidget {
     this.intervalMarkers = const [],
     this.recordedAudioPath,
     this.recordedSectionIndex,
+    this.sectionTakesByIndex = const {},
     this.originalAspectRatio,
     this.youtubeVideoId,
   });
@@ -2185,6 +2321,8 @@ class MotionComparisonViewer extends StatefulWidget {
   final String? recordedAudioPath;
   /// Section index that was actually recorded (e.g. D). Unrecorded chips are disabled.
   final int? recordedSectionIndex;
+  /// Independent takes keyed by section index (A/B/C…).
+  final Map<int, PracticeResult> sectionTakesByIndex;
   /// Prefer 9/16 for Shorts so comparison does not force 16:9 letterboxing.
   final double? originalAspectRatio;
   final String? youtubeVideoId;
@@ -2212,6 +2350,13 @@ class _MotionComparisonViewerState extends State<MotionComparisonViewer> {
   bool _loopingBack = false;
   /// Suppress YouTube→recorded drive while we are intentionally seeking chips.
   bool _ignoreYoutubeDrive = false;
+  /// Viewer-owned recorded controller when swapping independent section takes.
+  VideoPlayerController? _ownedRecorded;
+  String? _ownedRecordedPath;
+  String? _activeRecordedAudioPath;
+  bool _sectionBoundaryHit = false;
+
+  VideoPlayerController? get _activeRecorded => _ownedRecorded ?? widget.recorded;
 
   bool get _youtubeAlive => !_disposing && mounted && widget.originalYoutube != null;
 
@@ -2223,6 +2368,7 @@ class _MotionComparisonViewerState extends State<MotionComparisonViewer> {
   void initState() {
     super.initState();
     _playing = false;
+    _activeRecordedAudioPath = widget.recordedAudioPath;
     _applyInitialSectionChip(fromSetState: false);
     widget.original?.addListener(_onOriginalChanged);
     widget.recorded?.addListener(_onRecordedChanged);
@@ -2279,9 +2425,10 @@ class _MotionComparisonViewerState extends State<MotionComparisonViewer> {
     }
   }
 
-  /// Sections covered by this take (markers and/or the explicit recorded index).
+  /// Sections covered by independent takes and/or the explicit recorded index.
   Set<int> get _recordedSectionIndices {
     final out = <int>{};
+    out.addAll(widget.sectionTakesByIndex.keys);
     for (final marker in widget.intervalMarkers) {
       out.add(marker.segmentIndex);
     }
@@ -2295,7 +2442,6 @@ class _MotionComparisonViewerState extends State<MotionComparisonViewer> {
       if (idx >= 0) {
         out.add(idx);
       } else if (widget.loopStart > 0 || widget.loopEnd > widget.loopStart) {
-        // Ambiguous timestamps — still pin to initial chip resolution.
         out.add(_segmentIndex.clamp(0, widget.segments.length - 1));
       }
     }
@@ -2335,7 +2481,7 @@ class _MotionComparisonViewerState extends State<MotionComparisonViewer> {
 
   Future<void> _mirrorYoutubePauseToRecorded() async {
     try {
-      await widget.recorded?.pause();
+      await _activeRecorded?.pause();
       await _pauseRecordedAudio();
       await widget.original?.pause();
     } catch (_) {}
@@ -2349,12 +2495,13 @@ class _MotionComparisonViewerState extends State<MotionComparisonViewer> {
   Future<void> _mirrorYoutubePlayToRecorded() async {
     try {
       if (_hasRecorded) {
-        await widget.recorded?.play();
+        await _activeRecorded?.play();
         await _playRecordedAudio();
       }
       await widget.original?.play();
     } catch (_) {}
     if (_hasRecorded) _startRecordedSync();
+    _armSingleSectionBoundaryPoll();
     if (mounted) setState(() => _playing = true);
   }
 
@@ -2420,6 +2567,7 @@ class _MotionComparisonViewerState extends State<MotionComparisonViewer> {
       }
       await _ensureInitialized(widget.original);
       await _ensureInitialized(widget.recorded);
+      await _ensureInitialized(_ownedRecorded);
       await _prepareRecordedAudio();
       await _waitYoutubeReady();
       // Seek original to the saved section start BEFORE any play, then force both paused.
@@ -2498,7 +2646,7 @@ class _MotionComparisonViewerState extends State<MotionComparisonViewer> {
 
   Future<void> _forcePauseAll() async {
     try {
-      await widget.recorded?.pause();
+      await _activeRecorded?.pause();
     } catch (_) {}
     try {
       await _pauseRecordedAudio();
@@ -2542,10 +2690,11 @@ class _MotionComparisonViewerState extends State<MotionComparisonViewer> {
 
   // The recorded clip spans the whole practice session, so once it's present it
   // becomes the timeline's source of truth instead of the original's own range.
-  bool get _hasAudioRecorded => _audioReady && (widget.recordedAudioPath?.isNotEmpty ?? false);
+  bool get _hasAudioRecorded =>
+      _audioReady && (_activeRecordedAudioPath?.isNotEmpty ?? false);
 
   bool get _hasRecorded =>
-      (widget.recorded != null && widget.recorded!.value.isInitialized) || _hasAudioRecorded;
+      (_activeRecorded != null && _activeRecorded!.value.isInitialized) || _hasAudioRecorded;
 
   bool get _hasLoopRange => _rangeEnd > _rangeStart;
 
@@ -2601,7 +2750,7 @@ class _MotionComparisonViewerState extends State<MotionComparisonViewer> {
     if (_hasAudioRecorded && _audioDuration.inMilliseconds > 0) {
       return _audioDuration.inMilliseconds / 1000.0;
     }
-    final recorded = widget.recorded;
+    final recorded = _activeRecorded;
     if (recorded != null && recorded.value.isInitialized) {
       return recorded.value.duration.inMilliseconds / 1000.0;
     }
@@ -2617,8 +2766,8 @@ class _MotionComparisonViewerState extends State<MotionComparisonViewer> {
       final position = await _recordedAudio?.getCurrentPosition();
       return (position?.inMilliseconds ?? 0) / 1000.0;
     }
-    if (_hasRecorded && widget.recorded != null) {
-      return widget.recorded!.value.position.inMilliseconds / 1000.0;
+    if (_hasRecorded && _activeRecorded != null) {
+      return _activeRecorded!.value.position.inMilliseconds / 1000.0;
     }
     if (widget.original != null && widget.original!.value.isInitialized) {
       return widget.original!.value.position.inMilliseconds / 1000.0;
@@ -2629,6 +2778,42 @@ class _MotionComparisonViewerState extends State<MotionComparisonViewer> {
     return 0;
   }
 
+  /// Cap authored section.end to real media length (Shorts-safe).
+  double _effectiveComparisonSectionEnd(RoutineSegment segment) {
+    double? videoDuration;
+    try {
+      final meta = widget.originalYoutube?.metadata.duration.inMilliseconds;
+      if (meta != null && meta > 1000) videoDuration = meta / 1000.0;
+    } catch (_) {}
+    final original = widget.original;
+    if ((videoDuration == null || videoDuration <= 1) &&
+        original != null &&
+        original.value.isInitialized) {
+      final d = original.value.duration.inMilliseconds / 1000.0;
+      if (d > 1) videoDuration = d;
+    }
+    final rawEnd = segment.endSec;
+    final start = segment.startSec;
+    if (videoDuration == null || videoDuration <= 1) return rawEnd;
+    if (rawEnd >= videoDuration - 0.05) {
+      return (videoDuration - 0.35).clamp(start + 0.05, videoDuration);
+    }
+    if (rawEnd > videoDuration) {
+      return (videoDuration - 0.35).clamp(start + 0.05, videoDuration);
+    }
+    return rawEnd;
+  }
+
+  Future<void> _pauseAtSectionEnd() async {
+    if (_sectionBoundaryHit) return;
+    _sectionBoundaryHit = true;
+    debugPrint(
+      '[LOOPI] comparison single-section end '
+      '${sectionLabelForIndex(_segmentIndex)} — pause',
+    );
+    await _stopAtSavedEnd();
+  }
+
   Future<void> _stopAtSavedEnd() async {
     _loopTimer?.cancel();
     _loopTimer = null;
@@ -2637,7 +2822,7 @@ class _MotionComparisonViewerState extends State<MotionComparisonViewer> {
     if (mounted) setState(() => _playing = false);
     try {
       await widget.original?.pause();
-      await widget.recorded?.pause();
+      await _activeRecorded?.pause();
       await _pauseRecordedAudio();
       await _yt((player) => player.pauseVideo());
     } catch (_) {}
@@ -2645,36 +2830,44 @@ class _MotionComparisonViewerState extends State<MotionComparisonViewer> {
 
   void _onRecordedChanged() {
     if (!mounted || !_hasRecorded || _preparing) return;
-    final recorded = widget.recorded!;
+    final recorded = _activeRecorded;
+    if (recorded == null) return;
     final position = recorded.value.position.inMilliseconds / 1000.0;
     final bounded = position.clamp(_minPosition, _maxPosition);
     setState(() {
       _position = bounded;
       _playing = recorded.value.isPlaying;
     });
-    // Map recorded timeline → original time and update chip UI only (no seek).
-    _syncSegmentHighlight(_originalTimeForRecordedProgress(bounded));
-    // Single end-boundary listener for partial saves — never fight with seek timers.
-    if (!_loopingBack && position >= _maxPosition - 0.12 && recorded.value.isPlaying) {
-      unawaited(_stopAtSavedEnd());
+    // Single-section take: pause when the recorded clip itself ends.
+    if (!_loopingBack &&
+        !_sectionBoundaryHit &&
+        position >= _maxPosition - 0.12 &&
+        recorded.value.isPlaying) {
+      unawaited(_pauseAtSectionEnd());
     }
   }
 
   void _onOriginalChanged() {
-    if (_hasRecorded) return;
     if (_preparing) return;
     final original = widget.original;
     if (!mounted || original == null || !original.value.isInitialized) return;
     final position = original.value.position.inMilliseconds / 1000.0;
+    if (widget.segments.isNotEmpty) {
+      final segment = widget.segments[_segmentIndex.clamp(0, widget.segments.length - 1)];
+      final effectiveEnd = _effectiveComparisonSectionEnd(segment);
+      if (!_sectionBoundaryHit &&
+          original.value.isPlaying &&
+          position + 0.12 >= effectiveEnd) {
+        unawaited(_pauseAtSectionEnd());
+        return;
+      }
+    }
+    if (_hasRecorded) return;
     final bounded = _hasLoopRange ? position.clamp(_rangeStart, _rangeEnd) : position.clamp(0.0, _maxPosition);
     setState(() {
       _position = bounded;
       _playing = original.value.isPlaying;
     });
-    _syncSegmentHighlight(position);
-    if (_hasLoopRange && position >= _rangeEnd - 0.1 && original.value.isPlaying) {
-      unawaited(_stopAtSavedEnd());
-    }
   }
 
   /// Maps a position on the recorded clip (0…duration) onto the original timeline.
@@ -2739,22 +2932,19 @@ class _MotionComparisonViewerState extends State<MotionComparisonViewer> {
     final clamped = seconds.clamp(_minPosition, _maxPosition).toDouble();
     if (mounted) setState(() => _position = clamped);
     if (_hasRecorded) {
-      await widget.recorded?.seekTo(Duration(milliseconds: (clamped * 1000).round()));
+      await _activeRecorded?.seekTo(Duration(milliseconds: (clamped * 1000).round()));
       await _seekRecordedAudio(clamped);
       final progress = _maxPosition > 0 ? (clamped / _maxPosition).clamp(0.0, 1.0) : 0.0;
       final target = _rangeStart + progress * (_rangeEnd - _rangeStart);
-      // Always park the original at the mapped section time (never leave it at 0).
       await widget.original?.seekTo(Duration(milliseconds: (target * 1000).round()));
       if (widget.originalYoutube != null) {
         await _yt((player) => player.seekTo(seconds: target, allowSeekAhead: true));
       }
-      _syncSegmentHighlight(target);
     } else {
       await widget.original?.seekTo(Duration(milliseconds: (clamped * 1000).round()));
       if (widget.originalYoutube != null) {
         await _yt((player) => player.seekTo(seconds: clamped, allowSeekAhead: true));
       }
-      _syncSegmentHighlight(clamped);
     }
   }
 
@@ -2773,35 +2963,103 @@ class _MotionComparisonViewerState extends State<MotionComparisonViewer> {
     return null;
   }
 
-  /// Jumps straight to a routine segment's start time/speed, independent of
-  /// wherever the recorded clip's own timeline currently sits.
+  /// Loads an independent section take into the "내 동작" player (runtime only).
+  Future<void> _ensureSectionTakeLoaded(int index) async {
+    final take = widget.sectionTakesByIndex[index];
+    if (take == null) return;
+    final path = take.recordedPath?.trim();
+    if (take.isAudioRecording) {
+      _activeRecordedAudioPath = path;
+      if (path != null && path.isNotEmpty) {
+        await _prepareRecordedAudioForPath(path);
+      }
+      return;
+    }
+    if (path == null || path.isEmpty) return;
+    if (_ownedRecordedPath == path && _ownedRecorded?.value.isInitialized == true) {
+      return;
+    }
+    widget.recorded?.removeListener(_onRecordedChanged);
+    _ownedRecorded?.removeListener(_onRecordedChanged);
+    final previousOwned = _ownedRecorded;
+    try {
+      final next = (kIsWeb || path.startsWith('blob:') || path.startsWith('http'))
+          ? VideoPlayerController.networkUrl(Uri.parse(path))
+          : VideoPlayerController.file(File(path));
+      await next.initialize().timeout(const Duration(seconds: 8));
+      await next.pause();
+      await next.seekTo(Duration.zero);
+      _ownedRecorded = next;
+      _ownedRecordedPath = path;
+      _activeRecordedAudioPath = null;
+      next.addListener(_onRecordedChanged);
+      if (mounted) setState(() {});
+    } catch (e) {
+      debugPrint('[LOOPI] load section take failed: $e');
+    } finally {
+      if (previousOwned != null && !identical(previousOwned, _ownedRecorded)) {
+        try {
+          await previousOwned.dispose();
+        } catch (_) {}
+      }
+    }
+  }
+
+  Future<void> _prepareRecordedAudioForPath(String path) async {
+    await _recordedAudio?.dispose();
+    await _audioPosSub?.cancel();
+    final player = AudioPlayer();
+    _recordedAudio = player;
+    try {
+      if (path.startsWith('http://') ||
+          path.startsWith('https://') ||
+          path.startsWith('blob:') ||
+          path.startsWith('data:')) {
+        await player.setSourceUrl(path);
+      } else if (kIsWeb) {
+        await player.setSourceUrl(path);
+      } else {
+        await player.setSourceDeviceFile(path);
+      }
+      _audioDuration = await player.getDuration() ?? Duration.zero;
+      _audioReady = true;
+    } catch (e) {
+      debugPrint('[LOOPI] section audio load failed: $e');
+      _audioReady = false;
+    }
+  }
+
+  /// Single-section comparison: seek+play this section only; pause at effectiveEnd.
   Future<void> _selectSegment(int index) async {
     if (index < 0 || index >= widget.segments.length) return;
     final recorded = _recordedSectionIndices;
     if (recorded.isNotEmpty && !recorded.contains(index)) return;
     final segment = widget.segments[index];
-    setState(() => _segmentIndex = index);
+    setState(() {
+      _segmentIndex = index;
+      _sectionBoundaryHit = false;
+    });
 
     _ignoreYoutubeDrive = true;
     _loopTimer?.cancel();
     _recordedSyncTimer?.cancel();
     try {
-      final delay = segment.delaySec;
-      final waitTime = Duration(milliseconds: 120 + (delay * 1000));
       final start = segment.startSec;
-      final end = segment.endSec > start ? segment.endSec : null;
+      final effectiveEnd = _effectiveComparisonSectionEnd(segment);
+      final end = effectiveEnd > start ? effectiveEnd : null;
+      final speed = segment.speed <= 0 ? 1.0 : segment.speed;
 
       await widget.original?.pause();
       await _yt((player) => player.pauseVideo());
-      await widget.recorded?.pause();
+      await _activeRecorded?.pause();
       await _pauseRecordedAudio();
       if (mounted) setState(() => _playing = false);
 
-      await widget.original?.setPlaybackSpeed(segment.speed);
+      await _ensureSectionTakeLoaded(index);
+
+      await widget.original?.setPlaybackSpeed(speed);
       await widget.original?.seekTo(Duration(milliseconds: (start * 1000).round()));
 
-      // Force YouTube onto THIS chip's window. Prior cue endSeconds / playhead
-      // from E must not stick when the user taps D (especially identical ranges).
       if (widget.originalYoutube != null) {
         final videoId = (widget.youtubeVideoId ??
                 widget.originalYoutube!.metadata.videoId)
@@ -2820,7 +3078,7 @@ class _MotionComparisonViewerState extends State<MotionComparisonViewer> {
           debugPrint('[LOOPI] comparison cueVideoById ignored: $e');
         }
         try {
-          await _yt((player) => player.setPlaybackRate(segment.speed));
+          await _yt((player) => player.setPlaybackRate(speed));
         } catch (_) {}
         try {
           await _yt(
@@ -2829,49 +3087,67 @@ class _MotionComparisonViewerState extends State<MotionComparisonViewer> {
         } catch (e) {
           debugPrint('[LOOPI] comparison seekTo($start) ignored: $e');
         }
-        debugPrint(
-          '[LOOPI] comparison chip → ${sectionLabelForIndex(index)} '
-          'ytSeek=$start end=$end speed=${segment.speed}',
-        );
       }
 
-      if (_hasRecorded) {
-        final marker = _markerForSegment(index);
-        final double recordedTarget;
-        if (marker != null) {
-          recordedTarget = marker.startOffsetMillis / 1000.0;
-        } else {
-          final span = _rangeEnd - _rangeStart;
-          final progress =
-              span > 0 ? ((start - _rangeStart) / span).clamp(0.0, 1.0) : 0.0;
-          recordedTarget = progress * _recordedDurationSeconds;
-        }
-        await widget.recorded?.seekTo(Duration(milliseconds: (recordedTarget * 1000).round()));
-        await _seekRecordedAudio(recordedTarget);
-        if (mounted) setState(() => _position = recordedTarget.clamp(_minPosition, _maxPosition));
-      } else if (mounted) {
-        setState(() => _position = start.clamp(_minPosition, _maxPosition));
-      }
+      // Independent section take: always start recorded clip at 0.
+      await _activeRecorded?.seekTo(Duration.zero);
+      await _seekRecordedAudio(0);
+      if (mounted) setState(() => _position = 0);
 
-      await Future<void>.delayed(waitTime);
       if (!mounted || _disposing) return;
 
-      // Comparison / routine review: chip tap always seeks AND plays.
       try {
         await widget.original?.play();
         await _yt((player) => player.playVideo());
-        await widget.recorded?.play();
+        await _activeRecorded?.play();
         await _playRecordedAudio();
       } catch (e) {
         debugPrint('[LOOPI] comparison auto-play ignored: $e');
       }
+      _armSingleSectionBoundaryPoll();
       if (_hasRecorded) _startRecordedSync();
       if (mounted) setState(() => _playing = true);
+      debugPrint(
+        '[LOOPI] comparison chip → ${sectionLabelForIndex(index)} '
+        'start=$start effectiveEnd=$end speed=$speed',
+      );
     } catch (e) {
       debugPrint('[LOOPI] comparison selectSegment failed: $e');
     } finally {
       _ignoreYoutubeDrive = false;
     }
+  }
+
+  void _armSingleSectionBoundaryPoll() {
+    _loopTimer?.cancel();
+    _loopTimer = Timer.periodic(const Duration(milliseconds: 120), (_) async {
+      if (!mounted || !_playing || _loopingBack || _disposing || _sectionBoundaryHit) {
+        return;
+      }
+      if (widget.segments.isEmpty) return;
+      final segment = widget.segments[_segmentIndex.clamp(0, widget.segments.length - 1)];
+      final effectiveEnd = _effectiveComparisonSectionEnd(segment);
+      double? originalTime;
+      try {
+        if (widget.originalYoutube != null) {
+          originalTime = await _yt((player) => player.currentTime)
+              .timeout(const Duration(milliseconds: 400), onTimeout: () => null);
+        } else if (widget.original?.value.isInitialized == true) {
+          originalTime = widget.original!.value.position.inMilliseconds / 1000.0;
+        }
+      } catch (_) {}
+      if (originalTime != null && originalTime + 0.12 >= effectiveEnd) {
+        unawaited(_pauseAtSectionEnd());
+        return;
+      }
+      // Independent take: also stop when recorded clip ends.
+      if (_hasRecorded) {
+        final current = await _currentPlaybackSeconds();
+        if (current >= _maxPosition - 0.12) {
+          unawaited(_pauseAtSectionEnd());
+        }
+      }
+    });
   }
 
   /// Optional soft highlight sync only — never force-seek every tick (that caused
@@ -2881,29 +3157,20 @@ class _MotionComparisonViewerState extends State<MotionComparisonViewer> {
     if (!_hasRecorded) return;
     _recordedSyncTimer = Timer.periodic(const Duration(milliseconds: 500), (_) async {
       if (!mounted || !_hasRecorded || !_playing || _disposing || _loopingBack) return;
-      final double progress;
+      final recorded = _activeRecorded;
       if (_hasAudioRecorded) {
         final durationMs = _audioDuration.inMilliseconds;
         if (durationMs <= 0) return;
         final position = await _recordedAudio?.getCurrentPosition();
-        progress = ((position?.inMilliseconds ?? 0) / durationMs).clamp(0.0, 1.0);
-        if (progress >= 0.98) {
-          unawaited(_stopAtSavedEnd());
-          return;
-        }
-      } else {
-        final recorded = widget.recorded;
-        if (recorded == null) return;
-        final durationMs = recorded.value.duration.inMilliseconds;
-        if (durationMs <= 0) return;
-        progress = (recorded.value.position.inMilliseconds / durationMs).clamp(0.0, 1.0);
-        if (progress >= 0.98) {
-          unawaited(_stopAtSavedEnd());
-          return;
-        }
+        final progress = ((position?.inMilliseconds ?? 0) / durationMs).clamp(0.0, 1.0);
+        if (progress >= 0.98) unawaited(_pauseAtSectionEnd());
+        return;
       }
-      final target = _rangeStart + progress * (_rangeEnd - _rangeStart);
-      _syncSegmentHighlight(target);
+      if (recorded == null) return;
+      final durationMs = recorded.value.duration.inMilliseconds;
+      if (durationMs <= 0) return;
+      final progress = (recorded.value.position.inMilliseconds / durationMs).clamp(0.0, 1.0);
+      if (progress >= 0.98) unawaited(_pauseAtSectionEnd());
     });
   }
 
@@ -2919,30 +3186,22 @@ class _MotionComparisonViewerState extends State<MotionComparisonViewer> {
       return;
     }
 
-    // Re-align both sides to the current timeline, then start together.
+    // Resume current section from its start (single-section playback).
+    _sectionBoundaryHit = false;
+    if (widget.segments.isNotEmpty) {
+      await _selectSegment(_segmentIndex.clamp(0, widget.segments.length - 1));
+      return;
+    }
+
     await _seekBoth(_position.clamp(_minPosition, _maxPosition));
     await _forcePauseAll();
-
-    _loopTimer?.cancel();
-    _loopTimer = Timer.periodic(const Duration(milliseconds: 120), (_) async {
-      if (!mounted || !_playing || _loopingBack || _disposing) return;
-      final current = await _currentPlaybackSeconds();
-      if (!mounted || !_playing || _loopingBack) return;
-      // UI-only section chip sync from live playback time (never seek here).
-      if (_hasRecorded) {
-        _syncSegmentHighlight(_originalTimeForRecordedProgress(current));
-      } else {
-        _syncSegmentHighlight(current);
-      }
-      if (current >= _maxPosition - 0.1) {
-        unawaited(_stopAtSavedEnd());
-      }
-    });
+    _armSingleSectionBoundaryPoll();
     if (_hasRecorded) _startRecordedSync();
 
     final starts = <Future<void>>[];
-    if (widget.recorded != null && widget.recorded!.value.isInitialized) {
-      starts.add(widget.recorded!.play());
+    final recorded = _activeRecorded;
+    if (recorded != null && recorded.value.isInitialized) {
+      starts.add(recorded.play());
     }
     if (_hasAudioRecorded) {
       starts.add(_playRecordedAudio());
@@ -2960,9 +3219,8 @@ class _MotionComparisonViewerState extends State<MotionComparisonViewer> {
     }
 
     if (!mounted) return;
-    final recordedPlaying = widget.recorded?.value.isPlaying == true || _hasAudioRecorded;
+    final recordedPlaying = recorded?.value.isPlaying == true || _hasAudioRecorded;
     final originalPlaying = widget.original?.value.isPlaying == true || widget.originalYoutube != null;
-    // If a recorded clip exists, require it to actually start; otherwise stay paused.
     final started = _hasRecorded ? recordedPlaying : originalPlaying;
     if (!started && _hasRecorded) {
       await _forcePauseAll();
@@ -2993,8 +3251,10 @@ class _MotionComparisonViewerState extends State<MotionComparisonViewer> {
     _youtubeSub = null;
     widget.original?.removeListener(_onOriginalChanged);
     widget.recorded?.removeListener(_onRecordedChanged);
+    _ownedRecorded?.removeListener(_onRecordedChanged);
     unawaited(_audioPosSub?.cancel());
     unawaited(_recordedAudio?.dispose());
+    unawaited(_ownedRecorded?.dispose());
     _originalTransformController.dispose();
     _recordedTransformController.dispose();
     super.dispose();
@@ -3056,14 +3316,14 @@ class _MotionComparisonViewerState extends State<MotionComparisonViewer> {
               const SizedBox(height: 8),
               _segmentTabs(),
               if (widget.segments.length > 1) const SizedBox(height: 8),
-              if (isLandscape || _isVerticalPlayer(widget.original) || _isVerticalPlayer(widget.recorded))
+              if (isLandscape || _isVerticalPlayer(widget.original) || _isVerticalPlayer(_activeRecorded))
                 Expanded(
                   child: Row(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
                       Expanded(child: _videoPane('원본 영상', widget.original, widget.originalWidget, _originalTransformController, _resetOriginalZoom)),
                       const SizedBox(width: 12),
-                      Expanded(child: _videoPane('내 동작', widget.recorded, _recordedAudioWidget(), _recordedTransformController, _resetRecordedZoom)),
+                      Expanded(child: _videoPane('내 동작', _activeRecorded, _recordedAudioWidget(), _recordedTransformController, _resetRecordedZoom)),
                     ],
                   ),
                 )
@@ -3073,7 +3333,7 @@ class _MotionComparisonViewerState extends State<MotionComparisonViewer> {
                     children: [
                       Expanded(child: _videoPane('원본 영상', widget.original, widget.originalWidget, _originalTransformController, _resetOriginalZoom)),
                       const SizedBox(height: 12),
-                      Expanded(child: _videoPane('내 동작', widget.recorded, _recordedAudioWidget(), _recordedTransformController, _resetRecordedZoom)),
+                      Expanded(child: _videoPane('내 동작', _activeRecorded, _recordedAudioWidget(), _recordedTransformController, _resetRecordedZoom)),
                     ],
                   ),
                 ),
@@ -3187,6 +3447,7 @@ class MotionComparisonViewerPage extends StatefulWidget {
     this.recorded,
     this.originalYoutube,
     this.youtubeVideoId,
+    this.sourceType = SourceType.youtube,
     this.segments = const [],
     this.loopStart = 0,
     this.loopEnd = 0,
@@ -3194,7 +3455,9 @@ class MotionComparisonViewerPage extends StatefulWidget {
     this.intervalMarkers = const [],
     this.recordedAudioPath,
     this.recordedSectionIndex,
+    this.sectionTakesByIndex = const {},
     this.originalAspectRatio,
+    this.recordedMediaPath,
   });
 
   final String title;
@@ -3202,6 +3465,7 @@ class MotionComparisonViewerPage extends StatefulWidget {
   final VideoPlayerController? recorded;
   final YoutubePlayerController? originalYoutube;
   final String? youtubeVideoId;
+  final SourceType sourceType;
   final List<RoutineSegment> segments;
   final double loopStart;
   final double loopEnd;
@@ -3209,13 +3473,16 @@ class MotionComparisonViewerPage extends StatefulWidget {
   final List<PracticeIntervalMarker> intervalMarkers;
   final String? recordedAudioPath;
   final int? recordedSectionIndex;
+  final Map<int, PracticeResult> sectionTakesByIndex;
   final double? originalAspectRatio;
+  final String? recordedMediaPath;
 
   @override
   State<MotionComparisonViewerPage> createState() => _MotionComparisonViewerPageState();
 }
 
 class _MotionComparisonViewerPageState extends State<MotionComparisonViewerPage> {
+  final GlobalKey _comparisonSnapshotKey = GlobalKey();
   YoutubePlayerController? _youtube;
   bool _ownsYoutube = false;
   bool _disposing = false;
@@ -3231,13 +3498,15 @@ class _MotionComparisonViewerPageState extends State<MotionComparisonViewerPage>
   @override
   void initState() {
     super.initState();
-    final videoId = resolveYoutubeVideoId(videoId: widget.youtubeVideoId);
-    if (videoId != null) {
+    final useYoutube = widget.sourceType == SourceType.youtube;
+    final videoId = useYoutube
+        ? resolveYoutubeVideoId(videoId: widget.youtubeVideoId)
+        : null;
+    if (useYoutube && videoId != null) {
       unawaited(closeYoutubePlayerSafely(widget.originalYoutube));
       final start = widget.loopStart.isFinite ? widget.loopStart.clamp(0, 24 * 3600).toDouble() : 0.0;
       final end = widget.loopEnd.isFinite && widget.loopEnd > start ? widget.loopEnd : null;
-      debugPrint('[LOOPI] comparison YT cue startSeconds=$start endSeconds=$end');
-      // Cue at the saved section start — do not create a 00:00 player then hope seekTo works.
+      debugPrint('[LOOPI] comparison YT cue id=$videoId startSeconds=$start endSeconds=$end');
       _youtube = createLoopiYoutubeController(
         videoId: videoId,
         autoPlay: false,
@@ -3251,14 +3520,14 @@ class _MotionComparisonViewerPageState extends State<MotionComparisonViewerPage>
         isAlive: () => _youtubeAlive,
       );
     } else {
-      _youtube = widget.originalYoutube;
-      if (_youtube != null) {
-        _youtubeSub = listenYoutubeStream(
-          _youtube!.stream,
-          _onYoutubeReadySeek,
-          isAlive: () => _youtubeAlive,
-        );
-      }
+      // Local / network mp4 (or audio): never mount a YouTube iframe.
+      unawaited(closeYoutubePlayerSafely(widget.originalYoutube));
+      _youtube = null;
+      _ownsYoutube = false;
+      debugPrint(
+        '[LOOPI] comparison local original '
+        'source=${widget.sourceType.name} hasController=${widget.original != null}',
+      );
     }
     unawaited(_prepareRecorded());
     unawaited(_applyRoutinePlaybackRate());
@@ -3385,6 +3654,28 @@ class _MotionComparisonViewerPageState extends State<MotionComparisonViewerPage>
     super.dispose();
   }
 
+  String? get _activeRecordedPath {
+    final explicit = widget.recordedMediaPath?.trim();
+    if (explicit != null && explicit.isNotEmpty) return explicit;
+    final idx = widget.recordedSectionIndex;
+    if (idx != null) {
+      final take = widget.sectionTakesByIndex[idx];
+      final path = take?.recordedPath?.trim();
+      if (path != null && path.isNotEmpty) return path;
+    }
+    return widget.recordedAudioPath?.trim();
+  }
+
+  void _openExportSheet() {
+    ComparisonExport.showOptionsSheet(
+      context: context,
+      snapshotKey: _comparisonSnapshotKey,
+      recordedMediaPath: _activeRecordedPath,
+      recordedController: widget.recorded,
+      baseFileName: widget.title,
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -3394,28 +3685,39 @@ class _MotionComparisonViewerPageState extends State<MotionComparisonViewerPage>
           icon: const Icon(Icons.arrow_back),
           onPressed: _handleBack,
         ),
+        actions: [
+          IconButton(
+            tooltip: '저장 / 내보내기',
+            icon: const Icon(Icons.download_outlined),
+            onPressed: _openExportSheet,
+          ),
+        ],
       ),
       body: Padding(
         padding: const EdgeInsets.all(16),
-        child: MotionComparisonViewer(
-          original: widget.original,
-          recorded: widget.recorded,
-          originalYoutube: _youtube,
-          originalWidget: _youtube == null
-              ? null
-              : loopiYoutubePlayer(
-                  controller: _youtube!,
-                  aspectRatio: widget.originalAspectRatio ?? 16 / 9,
-                  backgroundColor: Colors.transparent,
-                ),
-          segments: widget.segments,
-          loopStart: widget.loopStart,
-          loopEnd: widget.loopEnd,
-          intervalMarkers: widget.intervalMarkers,
-          recordedAudioPath: widget.recordedAudioPath,
-          recordedSectionIndex: widget.recordedSectionIndex,
-          originalAspectRatio: widget.originalAspectRatio,
-          youtubeVideoId: widget.youtubeVideoId,
+        child: RepaintBoundary(
+          key: _comparisonSnapshotKey,
+          child: MotionComparisonViewer(
+            original: widget.original,
+            recorded: widget.recorded,
+            originalYoutube: _youtube,
+            originalWidget: _youtube == null
+                ? null
+                : loopiYoutubePlayer(
+                    controller: _youtube!,
+                    aspectRatio: widget.originalAspectRatio ?? 16 / 9,
+                    backgroundColor: Colors.transparent,
+                  ),
+            segments: widget.segments,
+            loopStart: widget.loopStart,
+            loopEnd: widget.loopEnd,
+            intervalMarkers: widget.intervalMarkers,
+            recordedAudioPath: widget.recordedAudioPath,
+            recordedSectionIndex: widget.recordedSectionIndex,
+            sectionTakesByIndex: widget.sectionTakesByIndex,
+            originalAspectRatio: widget.originalAspectRatio,
+            youtubeVideoId: widget.youtubeVideoId,
+          ),
         ),
       ),
     );
@@ -3423,20 +3725,28 @@ class _MotionComparisonViewerPageState extends State<MotionComparisonViewerPage>
 }
 
 class PracticeResultViewer extends StatefulWidget {
-  const PracticeResultViewer({super.key, required this.routine, required this.result});
+  const PracticeResultViewer({
+    super.key,
+    required this.routine,
+    required this.result,
+    this.sectionTakesByIndex = const {},
+  });
 
   final SavedRoutine routine;
   final PracticeResult result;
+  final Map<int, PracticeResult> sectionTakesByIndex;
 
   @override
   State<PracticeResultViewer> createState() => _PracticeResultViewerState();
 }
 
 class _PracticeResultViewerState extends State<PracticeResultViewer> {
+  final GlobalKey _practiceResultSnapshotKey = GlobalKey();
   VideoPlayerController? _original;
   VideoPlayerController? _recorded;
   YoutubePlayerController? _youtube;
   String? _recordedObjectUrl;
+  String? _originalObjectUrl;
   bool _loading = true;
   String? _loadError;
   bool _disposing = false;
@@ -3547,28 +3857,36 @@ class _PracticeResultViewerState extends State<PracticeResultViewer> {
         } else {
           throw StateError('유튜브 영상 ID를 찾을 수 없습니다.');
         }
-      } else if (widget.routine.localDataBytes != null) {
-        final url = createMediaBlobUrl(widget.routine.localDataBytes!, 'video/mp4');
-        _original = VideoPlayerController.networkUrl(url == null
-            ? Uri.dataFromBytes(widget.routine.localDataBytes!, mimeType: 'video/mp4')
-            : Uri.parse(url));
-        await _original!.initialize().timeout(const Duration(seconds: 8));
-        await _original!.setPlaybackSpeed(widget.result.playbackRate);
-        await _original!.pause();
-        await _original!.seekTo(Duration(milliseconds: (loopStart * 1000).round()));
-        _hasInitialSeek = true;
-      } else if (widget.routine.localFilePath != null &&
-          widget.routine.localFilePath!.trim().isNotEmpty) {
-        _original = kIsWeb
-            ? VideoPlayerController.networkUrl(Uri.parse(widget.routine.localFilePath!))
-            : VideoPlayerController.file(File(widget.routine.localFilePath!));
-        await _original!.initialize().timeout(const Duration(seconds: 8));
-        await _original!.setPlaybackSpeed(widget.result.playbackRate);
-        await _original!.pause();
-        await _original!.seekTo(Duration(milliseconds: (loopStart * 1000).round()));
-        _hasInitialSeek = true;
-      } else if (widget.routine.sourceType != SourceType.youtube) {
-        throw StateError('원본 영상을 불러올 수 없습니다.');
+      } else if (widget.routine.sourceType == SourceType.localVideo ||
+          widget.routine.sourceType == SourceType.audio) {
+        if (widget.routine.localDataBytes != null &&
+            widget.routine.localDataBytes!.isNotEmpty) {
+          _originalObjectUrl = createMediaBlobUrl(widget.routine.localDataBytes!, 'video/mp4');
+          final url = _originalObjectUrl;
+          _original = VideoPlayerController.networkUrl(url == null
+              ? Uri.dataFromBytes(widget.routine.localDataBytes!, mimeType: 'video/mp4')
+              : Uri.parse(url));
+          await _original!.initialize().timeout(const Duration(seconds: 8));
+          await _original!.setPlaybackSpeed(widget.result.playbackRate);
+          await _original!.pause();
+          await _original!.seekTo(Duration(milliseconds: (loopStart * 1000).round()));
+          _hasInitialSeek = true;
+        } else if (widget.routine.localFilePath != null &&
+            widget.routine.localFilePath!.trim().isNotEmpty) {
+          final path = widget.routine.localFilePath!.trim();
+          _original = kIsWeb
+              ? VideoPlayerController.networkUrl(Uri.parse(path))
+              : VideoPlayerController.file(File(path));
+          await _original!.initialize().timeout(const Duration(seconds: 8));
+          await _original!.setPlaybackSpeed(widget.result.playbackRate);
+          await _original!.pause();
+          await _original!.seekTo(Duration(milliseconds: (loopStart * 1000).round()));
+          _hasInitialSeek = true;
+        } else {
+          throw StateError('원본 로컬 영상을 불러올 수 없습니다.');
+        }
+      } else {
+        throw StateError('지원하지 않는 원본 영상 형식입니다.');
       }
 
       final bytes = widget.result.recordedDataBytes;
@@ -3687,7 +4005,10 @@ class _PracticeResultViewerState extends State<PracticeResultViewer> {
     _original = null;
     _recorded = null;
     _youtube = null;
+    revokeMediaBlobUrl(_recordedObjectUrl);
+    revokeMediaBlobUrl(_originalObjectUrl);
     _recordedObjectUrl = null;
+    _originalObjectUrl = null;
     await _load();
   }
 
@@ -3700,6 +4021,9 @@ class _PracticeResultViewerState extends State<PracticeResultViewer> {
     _recorded?.dispose();
     unawaited(closeYoutubePlayerSafely(_youtube));
     revokeMediaBlobUrl(_recordedObjectUrl);
+    revokeMediaBlobUrl(_originalObjectUrl);
+    _recordedObjectUrl = null;
+    _originalObjectUrl = null;
     super.dispose();
   }
 
@@ -3746,8 +4070,8 @@ class _PracticeResultViewerState extends State<PracticeResultViewer> {
 
     final safeRoutine = sanitizeRoutineForPractice(widget.routine);
     final markers = widget.result.intervalMarkers;
-    int? recordedSectionIndex;
-    if (markers.isNotEmpty) {
+    int? recordedSectionIndex = widget.result.recordedSectionIndex;
+    if (recordedSectionIndex == null && markers.isNotEmpty) {
       var first = markers.first;
       for (final marker in markers) {
         if ((marker.endOffsetMillis - marker.startOffsetMillis) >= 200) {
@@ -3756,12 +4080,17 @@ class _PracticeResultViewerState extends State<PracticeResultViewer> {
         }
       }
       recordedSectionIndex = first.segmentIndex;
-    } else {
+    } else if (recordedSectionIndex == null) {
       final start = widget.result.startTime;
       final idx = safeRoutine.segments.indexWhere(
         (s) => start >= s.startSec && start < s.endSec,
       );
       if (idx >= 0) recordedSectionIndex = idx;
+    }
+
+    final sectionTakes = Map<int, PracticeResult>.from(widget.sectionTakesByIndex);
+    if (recordedSectionIndex != null) {
+      sectionTakes.putIfAbsent(recordedSectionIndex, () => widget.result);
     }
 
     return Scaffold(
@@ -3771,10 +4100,27 @@ class _PracticeResultViewerState extends State<PracticeResultViewer> {
           icon: const Icon(Icons.arrow_back),
           onPressed: () => closeShellOrPop(context),
         ),
+        actions: [
+          IconButton(
+            tooltip: '저장 / 내보내기',
+            icon: const Icon(Icons.download_outlined),
+            onPressed: () {
+              ComparisonExport.showOptionsSheet(
+                context: context,
+                snapshotKey: _practiceResultSnapshotKey,
+                recordedMediaPath: widget.result.recordedPath,
+                recordedController: _recorded,
+                baseFileName: widget.result.name,
+              );
+            },
+          ),
+        ],
       ),
       body: Padding(
         padding: const EdgeInsets.all(16),
-        child: MotionComparisonViewer(
+        child: RepaintBoundary(
+          key: _practiceResultSnapshotKey,
+          child: MotionComparisonViewer(
           original: _original,
           recorded: _recorded,
           segments: safeRoutine.segments,
@@ -3791,10 +4137,12 @@ class _PracticeResultViewerState extends State<PracticeResultViewer> {
           intervalMarkers: widget.result.intervalMarkers,
           recordedAudioPath: widget.result.isAudioRecording ? widget.result.recordedPath : null,
           recordedSectionIndex: recordedSectionIndex,
+          sectionTakesByIndex: sectionTakes,
           originalAspectRatio: originalAspectRatioForRoutine(safeRoutine),
           youtubeVideoId: resolveYoutubeVideoId(
             videoId: safeRoutine.videoId,
             videoUrl: safeRoutine.videoUrl,
+          ),
           ),
         ),
       ),

@@ -7,9 +7,11 @@ String createMediaBlobUrl(List<int> bytes, String mimeType) {
 }
 
 void revokeMediaBlobUrl(String? url) {
-  if (url != null && url.startsWith('blob:')) {
+  if (url == null || url.isEmpty) return;
+  if (!url.startsWith('blob:')) return;
+  try {
     html.Url.revokeObjectUrl(url);
-  }
+  } catch (_) {}
 }
 
 /// Reads a same-origin `blob:` / `data:` URL. The Dart `http` client cannot.

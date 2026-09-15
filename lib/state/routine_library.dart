@@ -7,6 +7,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../models/routine_models.dart';
 import '../services/auth_service.dart';
 import '../services/database_service.dart';
+import '../utils/storage_quota.dart';
 
 /// Saved routine presets, backed by SharedPreferences and optionally Firestore.
 class RoutineLibrary extends ChangeNotifier {
@@ -18,6 +19,7 @@ class RoutineLibrary extends ChangeNotifier {
 
   final DatabaseService _database;
   String? _uid;
+  bool _storageQuotaPending = false;
 
   final List<SavedRoutine> _routines = [];
   final List<RoutineGroup> _groups = [];
@@ -27,6 +29,16 @@ class RoutineLibrary extends ChangeNotifier {
   List<RoutineGroup> get groups => List.unmodifiable(_groups);
   List<PracticeResult> get practiceResults => List.unmodifiable(_practiceResults);
   List<SavedRoutine> get favoriteRoutines => _routines.where((routine) => routine.isFavorite).toList();
+
+  /// True once after a local persist fails due to storage quota.
+  bool get hasStorageQuotaWarning => _storageQuotaPending;
+
+  /// Returns true once when a quota failure should be shown in the UI.
+  bool consumeStorageQuotaWarning() {
+    if (!_storageQuotaPending) return false;
+    _storageQuotaPending = false;
+    return true;
+  }
 
   Future<void> load() async {
     final prefs = await SharedPreferences.getInstance();
@@ -38,9 +50,12 @@ class RoutineLibrary extends ChangeNotifier {
       ..clear()
       ..addAll(
         savedRoutines
-            .map((value) => jsonDecode(value))
+            .map(_decodePrefsMap)
             .whereType<Map<String, dynamic>>()
-            .map(SavedRoutine.fromJson)
+            .map((json) {
+              json.remove('localDataBytes');
+              return SavedRoutine.fromJson(json);
+            })
             .toList(),
       );
 
@@ -48,7 +63,7 @@ class RoutineLibrary extends ChangeNotifier {
       ..clear()
       ..addAll(
         savedGroups
-            .map((value) => jsonDecode(value))
+            .map(_decodePrefsMap)
             .whereType<Map<String, dynamic>>()
             .map(RoutineGroup.fromJson)
             .toList(),
@@ -57,11 +72,25 @@ class RoutineLibrary extends ChangeNotifier {
       ..clear()
       ..addAll(
         savedPracticeResults
-            .map((value) => jsonDecode(value))
+            .map(_decodePrefsMap)
             .whereType<Map<String, dynamic>>()
-            .map(PracticeResult.fromJson),
+            .map((json) {
+              json.remove('recordedDataBytes');
+              return PracticeResult.fromJson(json);
+            }),
       );
     notifyListeners();
+    // Migrate any legacy prefs that still contain base64/blob payloads.
+    unawaited(_persistLocal());
+  }
+
+  Map<String, dynamic>? _decodePrefsMap(String value) {
+    try {
+      final decoded = jsonDecode(value);
+      if (decoded is Map<String, dynamic>) return decoded;
+      if (decoded is Map) return Map<String, dynamic>.from(decoded);
+    } catch (_) {}
+    return null;
   }
 
   Future<void> attachUser(String uid) async {
@@ -104,18 +133,43 @@ class RoutineLibrary extends ChangeNotifier {
 
   Future<void> _persistLocal() async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setStringList(
-      _routineStorageKey,
-      _routines.map((routine) => jsonEncode(routine.toJson())).toList(),
-    );
-    await prefs.setStringList(
-      _groupStorageKey,
-      _groups.map((group) => jsonEncode(group.toJson())).toList(),
-    );
-    await prefs.setStringList(
-      _practiceStorageKey,
-      _practiceResults.map((result) => jsonEncode(result.toLocalJson())).toList(),
-    );
+    // Metadata only — never write base64 / blob / data: media into prefs.
+    final routinePayload =
+        _routines.map((routine) => jsonEncode(routine.toPrefsJson())).toList();
+    final groupPayload =
+        _groups.map((group) => jsonEncode(group.toJson())).toList();
+    final practicePayload =
+        _practiceResults.map((result) => jsonEncode(result.toLocalJson())).toList();
+
+    try {
+      await prefs.setStringList(_routineStorageKey, routinePayload);
+      await prefs.setStringList(_groupStorageKey, groupPayload);
+      await prefs.setStringList(_practiceStorageKey, practicePayload);
+    } catch (error) {
+      debugPrint(
+        '[LOOPI] SharedPreferences QuotaExceeded/persist failed: $error — '
+        'rewriting metadata-only library',
+      );
+      try {
+        await prefs.remove(_routineStorageKey);
+        await prefs.remove(_groupStorageKey);
+        await prefs.remove(_practiceStorageKey);
+        await prefs.setStringList(_routineStorageKey, routinePayload);
+        await prefs.setStringList(_groupStorageKey, groupPayload);
+        await prefs.setStringList(_practiceStorageKey, practicePayload);
+      } catch (retryError) {
+        debugPrint('[LOOPI] SharedPreferences recovery failed: $retryError');
+        _storageQuotaPending = true;
+        notifyListeners();
+        throw StorageQuotaExceededException(retryError);
+      }
+      if (StorageQuotaExceededException.matches(error)) {
+        _storageQuotaPending = true;
+        notifyListeners();
+        // Recovered after wipe — still nudge so the user can free space.
+        // Do not throw; data was rewritten successfully.
+      }
+    }
   }
 
   Future<void> _syncCloud() async {
@@ -182,9 +236,33 @@ class RoutineLibrary extends ChangeNotifier {
   }
 
   Future<void> savePracticeResult(PracticeResult result) async {
+    // Single-section takes: replace prior take for the same routine+section.
+    final section = result.recordedSectionIndex;
+    if (section != null) {
+      _practiceResults.removeWhere(
+        (existing) =>
+            existing.routineId == result.routineId &&
+            existing.recordedSectionIndex == section,
+      );
+    }
     _practiceResults.insert(0, result);
     notifyListeners();
     await _persistLocal();
+  }
+
+  /// Latest take per section index for a routine (independent section recordings).
+  Map<int, PracticeResult> latestPracticeTakesBySection(String routineId) {
+    final out = <int, PracticeResult>{};
+    for (final result in _practiceResults) {
+      if (result.routineId != routineId) continue;
+      final idx = result.recordedSectionIndex;
+      if (idx == null) continue;
+      final prev = out[idx];
+      if (prev == null || result.createdAt.isAfter(prev.createdAt)) {
+        out[idx] = result;
+      }
+    }
+    return out;
   }
 
   bool? toggleFavoriteOptimistic(String id) {

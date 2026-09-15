@@ -9,6 +9,7 @@ import 'services/auth_service.dart';
 import 'state/routine_library.dart';
 import 'state/user_state.dart';
 import 'theme/loopi_colors.dart';
+import 'utils/app_locale.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -22,10 +23,15 @@ void main() async {
   }
   runApp(
     EasyLocalization(
-      supportedLocales: const [Locale('en'), Locale('ko')],
+      supportedLocales: kSupportedAppLocales,
       path: 'assets/translations',
-      fallbackLocale: const Locale('en'),
-      startLocale: const Locale('en'),
+      fallbackLocale: kFallbackAppLocale,
+      // Detect browser/OS language; unsupported codes fall back to English.
+      startLocale: detectSystemAppLocale(),
+      useOnlyLangCode: true,
+      // Avoid persisting a forced locale so cold starts follow the system
+      // language (clears the effect of a legacy SharedPreferences "en").
+      saveLocale: false,
       child: const LoopiApp(),
     ),
   );
@@ -51,13 +57,15 @@ class _LoopiAppState extends State<LoopiApp> {
   @override
   Widget build(BuildContext context) {
     final localization = EasyLocalization.of(context);
-    final delegates = localization?.delegates ?? [
-      GlobalMaterialLocalizations.delegate,
-      GlobalWidgetsLocalizations.delegate,
-      GlobalCupertinoLocalizations.delegate,
-    ];
-    final supportedLocales = localization?.supportedLocales ?? const [Locale('en'), Locale('ko')];
-    final locale = localization?.locale ?? const Locale('en');
+    final delegates = localization?.delegates ??
+        const [
+          GlobalMaterialLocalizations.delegate,
+          GlobalWidgetsLocalizations.delegate,
+          GlobalCupertinoLocalizations.delegate,
+        ];
+    final supportedLocales =
+        localization?.supportedLocales ?? kSupportedAppLocales;
+    final locale = localization?.locale ?? detectSystemAppLocale();
 
     return MaterialApp(
       title: 'LOOPI',
@@ -65,6 +73,9 @@ class _LoopiAppState extends State<LoopiApp> {
       localizationsDelegates: delegates,
       supportedLocales: supportedLocales,
       locale: locale,
+      localeResolutionCallback: (deviceLocale, supported) {
+        return resolveAppLocale(deviceLocale);
+      },
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(seedColor: LoopiColors.purple),
         useMaterial3: true,

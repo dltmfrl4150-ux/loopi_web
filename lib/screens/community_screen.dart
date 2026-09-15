@@ -13,12 +13,12 @@ import '../models/routine_category.dart';
 import '../models/routine_models.dart';
 import '../services/database_service.dart';
 import '../utils/cached_video.dart';
+import '../utils/youtube_id.dart';
 import '../state/routine_library.dart';
 import '../state/user_state.dart';
 import '../theme/loopi_colors.dart';
 import '../widgets/cached_remote_image.dart';
 import '../widgets/category_filter_chips.dart';
-import '../widgets/highlight_interval.dart';
 import 'routine_player_screen.dart';
 import 'user_profile_screen.dart';
 
@@ -491,44 +491,22 @@ class _RoutinesTab extends StatelessWidget {
           }
           final post = posts[index];
           final favorited = post.isFavoritedBy(uid);
-          final thumbUrl = post.routine.sourceType == SourceType.youtube &&
-                  post.routine.videoId.isNotEmpty
-              ? 'https://img.youtube.com/vi/${post.routine.videoId}/mqdefault.jpg'
-              : null;
           return Card(
             margin: const EdgeInsets.only(bottom: 10),
             child: ListTile(
               onTap: () => onOpen(post),
-              leading: thumbUrl == null
-                  ? CircleAvatar(
-                      backgroundColor: LoopiColors.purple.withValues(alpha: 0.15),
-                      child: Text(
-                        '${index + 1}',
-                        style: const TextStyle(color: LoopiColors.deepPurple, fontWeight: FontWeight.w800),
-                      ),
-                    )
-                  : ClipRRect(
-                      borderRadius: BorderRadius.circular(8),
-                      child: SizedBox(
-                        width: 52,
-                        height: 40,
-                        child: _NetworkThumb(
-                          url: thumbUrl,
-                          fallback: CircleAvatar(
-                            backgroundColor: LoopiColors.purple.withValues(alpha: 0.15),
-                            child: Text(
-                              '${index + 1}',
-                              style: const TextStyle(color: LoopiColors.deepPurple, fontWeight: FontWeight.w800),
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
+              leading: _RoutineSourceThumb(routine: post.routine),
               title: Text(post.routine.name, maxLines: 1, overflow: TextOverflow.ellipsis),
               subtitle: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   const SizedBox(height: 2),
+                  Text(
+                    post.description.isEmpty ? 'community.no_description'.tr() : post.description,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  const SizedBox(height: 6),
                   InkWell(
                     onTap: () => onOpenAuthor(post),
                     child: Row(
@@ -537,28 +515,18 @@ class _RoutinesTab extends StatelessWidget {
                         const SizedBox(width: 6),
                         Flexible(
                           child: Text(
-                      '@${post.authorName}',
-                      style: const TextStyle(
-                        color: LoopiColors.deepPurple,
-                        fontWeight: FontWeight.w700,
-                        decoration: TextDecoration.underline,
-                        decorationColor: LoopiColors.deepPurple,
-                      ),
-                    ),
+                            '@${post.authorName}',
+                            style: const TextStyle(
+                              color: LoopiColors.deepPurple,
+                              fontWeight: FontWeight.w700,
+                              decoration: TextDecoration.underline,
+                              decorationColor: LoopiColors.deepPurple,
+                            ),
+                          ),
                         ),
                       ],
                     ),
                   ),
-                  const SizedBox(height: 2),
-                  Text(
-                    post.description.isEmpty ? 'community.no_description'.tr() : post.description,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                  if (post.routine.hasHighlight) ...[
-                    const SizedBox(height: 6),
-                    const ChorusContainsBadge(compact: true),
-                  ],
                 ],
               ),
               isThreeLine: true,
@@ -898,6 +866,57 @@ class _LightweightVideoThumb extends StatelessWidget {
       );
     }
     return _PlaceholderThumb(title: fallbackTitle);
+  }
+}
+
+/// Leading thumbnail for Hub routine cards (YouTube / local video / audio).
+class _RoutineSourceThumb extends StatelessWidget {
+  const _RoutineSourceThumb({required this.routine});
+
+  final SavedRoutine routine;
+
+  static const double _size = 50;
+
+  @override
+  Widget build(BuildContext context) {
+    final ytUrl = routine.sourceType == SourceType.youtube
+        ? (youtubeThumbnailUrl(routine.videoId) ?? youtubeThumbnailUrl(routine.videoUrl))
+        : null;
+
+    if (ytUrl != null) {
+      return ClipRRect(
+        borderRadius: BorderRadius.circular(10),
+        child: SizedBox(
+          width: _size,
+          height: _size,
+          child: _NetworkThumb(
+            url: ytUrl,
+            fallback: _iconThumb(Icons.play_circle_outline, LoopiColors.purple),
+          ),
+        ),
+      );
+    }
+
+    switch (routine.sourceType) {
+      case SourceType.audio:
+        return _iconThumb(Icons.audiotrack_rounded, LoopiColors.deepPurple);
+      case SourceType.localVideo:
+        return _iconThumb(Icons.movie_outlined, LoopiColors.purple);
+      case SourceType.youtube:
+        return _iconThumb(Icons.play_circle_outline, LoopiColors.purple);
+    }
+  }
+
+  Widget _iconThumb(IconData icon, Color accent) {
+    return Container(
+      width: _size,
+      height: _size,
+      decoration: BoxDecoration(
+        color: accent.withValues(alpha: 0.14),
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Icon(icon, color: accent, size: 26),
+    );
   }
 }
 

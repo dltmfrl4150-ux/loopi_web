@@ -214,6 +214,21 @@ class SavedRoutine {
     return json;
   }
 
+  /// SharedPreferences payload: metadata only — never base64/blob/data URLs.
+  Map<String, dynamic> toPrefsJson() {
+    final json = toFirestoreJson();
+    json.remove('localDataBytes');
+    final path = json['localFilePath'] as String?;
+    if (path != null && _isEphemeralMediaRef(path)) {
+      json.remove('localFilePath');
+    }
+    final url = json['videoUrl'] as String?;
+    if (url != null && _isEphemeralMediaRef(url)) {
+      json['videoUrl'] = '';
+    }
+    return json;
+  }
+
   SavedRoutine copyWith({
     bool? isFavorite,
     String? authorId,
@@ -298,6 +313,7 @@ class PracticeResult {
     this.category = RoutineCategory.dance,
     this.intervalMarkers = const [],
     this.isAudioRecording = false,
+    this.recordedSectionIndex,
   });
 
   final String id;
@@ -312,6 +328,8 @@ class PracticeResult {
   final String category;
   final List<PracticeIntervalMarker> intervalMarkers;
   final bool isAudioRecording;
+  /// Which routine section this take belongs to (single-section practice).
+  final int? recordedSectionIndex;
 
   factory PracticeResult.fromJson(Map<String, dynamic> json) {
     final rawMarkers = json['intervalMarkers'];
@@ -323,6 +341,16 @@ class PracticeResult {
         (json['endTime'] as num?)?.toDouble() ??
         0.0;
     if (end < start) end = start;
+    int? sectionIndex = (json['recordedSectionIndex'] as num?)?.toInt();
+    if (sectionIndex == null && rawMarkers is List && rawMarkers.isNotEmpty) {
+      for (final item in rawMarkers.whereType<Map>()) {
+        final idx = (item['segmentIndex'] as num?)?.toInt();
+        if (idx != null) {
+          sectionIndex = idx;
+          break;
+        }
+      }
+    }
     return PracticeResult(
       id: json['id'] as String? ?? 'practice_${DateTime.now().microsecondsSinceEpoch}',
       name: (json['name'] as String?)?.trim().isNotEmpty == true
@@ -358,6 +386,7 @@ class PracticeResult {
               .toList()
           : const [],
       isAudioRecording: json['isAudioRecording'] == true || _pathLooksLikeAudio(json['recordedPath'] as String?),
+      recordedSectionIndex: sectionIndex,
     );
   }
 
@@ -377,6 +406,7 @@ class PracticeResult {
         'category': RoutineCategory.normalize(category),
         'intervalMarkers': intervalMarkers.map((marker) => marker.toJson()).toList(),
         'isAudioRecording': isAudioRecording,
+        'recordedSectionIndex': recordedSectionIndex,
       };
 
   Map<String, dynamic> toFirestoreJson() {
@@ -386,12 +416,23 @@ class PracticeResult {
     return json;
   }
 
-  /// Session-safe local metadata. Never persist video bytes in SharedPreferences.
+  /// Session-safe local metadata. Never persist video bytes or ephemeral blob URLs.
   Map<String, dynamic> toLocalJson() {
     final json = toJson();
     json.remove('recordedDataBytes');
+    final path = json['recordedPath'] as String?;
+    if (path != null && _isEphemeralMediaRef(path)) {
+      json.remove('recordedPath');
+    }
     return json;
   }
+}
+
+bool _isEphemeralMediaRef(String value) {
+  final lower = value.trim().toLowerCase();
+  return lower.startsWith('blob:') ||
+      lower.startsWith('data:') ||
+      lower.startsWith('file:blob');
 }
 
 @immutable

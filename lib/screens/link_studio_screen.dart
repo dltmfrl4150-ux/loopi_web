@@ -26,6 +26,8 @@ import '../widgets/app_logo.dart';
 import '../widgets/highlight_interval.dart';
 import '../widgets/load_cached_routine_dialog.dart';
 import '../widgets/save_routine_dialog.dart';
+import '../widgets/storage_quota_nudge.dart';
+import '../utils/storage_quota.dart';
 import 'practice_mode_screen.dart';
 
 const String kDefaultVideoUrl = 'https://www.youtube.com/watch?v=M7lc1UVf-VE';
@@ -1083,10 +1085,13 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
     if (result == null) return;
 
     final overwrite = result.overwrite && editing != null;
+    final isYoutube = _session.sourceType == SourceType.youtube;
     final routine = _session.toSavedRoutine(
       name: result.name,
-      videoUrl: _videoUrl,
-      videoId: _videoId,
+      videoUrl: isYoutube ? _videoUrl : '',
+      videoId: isYoutube
+          ? (resolveYoutubeVideoId(videoId: _videoId, videoUrl: _videoUrl) ?? '')
+          : '',
       id: overwrite ? editing.id : null,
       createdAt: overwrite ? editing.createdAt : null,
       isFavorite: overwrite ? editing.isFavorite : false,
@@ -1096,25 +1101,38 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
       isMirrored: _isMirrored ?? false,
     );
 
-    if (overwrite) {
-      await widget.library.update(routine);
+    try {
+      if (overwrite) {
+        await widget.library.update(routine);
+        unawaited(_persistCachedVideo(routine));
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('"${result.name}" 루틴을 덮어썼습니다.')),
+        );
+        if (Navigator.of(context).canPop()) {
+          Navigator.of(context).pop(routine);
+        }
+        return;
+      }
+
+      await widget.library.save(routine);
       unawaited(_persistCachedVideo(routine));
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('"${result.name}" 루틴을 덮어썼습니다.')),
+        SnackBar(content: Text('"${result.name}" ${'studio.save_success'.tr()}')),
       );
-      if (Navigator.of(context).canPop()) {
-        Navigator.of(context).pop(routine);
-      }
+    } on StorageQuotaExceededException {
+      if (!mounted) return;
+      await showStorageQuotaNudge(context);
       return;
+    } catch (error) {
+      if (StorageQuotaExceededException.matches(error)) {
+        if (!mounted) return;
+        await showStorageQuotaNudge(context);
+        return;
+      }
+      rethrow;
     }
-
-    await widget.library.save(routine);
-    unawaited(_persistCachedVideo(routine));
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('"${result.name}" ${'studio.save_success'.tr()}')),
-    );
 
     if (editing != null) {
       if (Navigator.of(context).canPop()) {
@@ -2026,28 +2044,37 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
           child: Row(
             children: [
               Expanded(
-                child: FilledButton(
+                child: OutlinedButton.icon(
                   onPressed: _toggleTestPlayback,
-                  style: FilledButton.styleFrom(
-                    backgroundColor: testing ? Colors.redAccent : LoopiColors.deepPurple,
-                    foregroundColor: Colors.white,
+                  icon: Icon(testing ? Icons.stop : Icons.play_arrow),
+                  label: Text(testing ? 'studio.stop_routine'.tr() : 'studio.practice_now'.tr()),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: testing ? Colors.redAccent : LoopiColors.purple,
+                    side: BorderSide(
+                      color: testing ? Colors.redAccent : LoopiColors.purple.withValues(alpha: 0.55),
+                      width: 1.4,
+                    ),
+                    backgroundColor: testing
+                        ? Colors.redAccent.withValues(alpha: 0.08)
+                        : LoopiColors.purple.withValues(alpha: 0.08),
                     padding: const EdgeInsets.symmetric(vertical: 16),
                     shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
                   ),
-                  child: Text(testing ? 'Stop Routine' : 'Start Routine'),
                 ),
               ),
               const SizedBox(width: 12),
               Expanded(
-                child: FilledButton(
+                child: FilledButton.icon(
                   onPressed: testing ? null : _onSavePressed,
+                  icon: const Icon(Icons.save_outlined),
+                  label: Text('studio.save_routine_button'.tr()),
                   style: FilledButton.styleFrom(
                     backgroundColor: LoopiColors.deepPurple,
                     foregroundColor: Colors.white,
+                    disabledBackgroundColor: LoopiColors.deepPurple.withValues(alpha: 0.35),
                     padding: const EdgeInsets.symmetric(vertical: 16),
                     shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
                   ),
-                  child: const Text('Save Routine'),
                 ),
               ),
             ],

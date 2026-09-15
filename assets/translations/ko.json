@@ -17,11 +17,11 @@
     "quick_action_subtitle": "유튜브 링크 등록",
     "recent_routines": "최근 연습한 루틴",
     "view_all": "전체 보기",
-    "no_routines": "아직 저장한 루틴이 없어요.\n첫 루틴을 만들어볼까요?",
+    "no_routines": "아직 저장한 루틴이 없어요! 위의 버튼을 눌러 첫 루틴을 만들어 보세요",
     "start_practice": "바로 시작",
     "tab_home": "홈",
     "tab_studio": "스튜디오",
-    "tab_community": "커뮤니티",
+    "tab_community": "모두의 루틴",
     "tab_settings": "설정",
     "create_routine_youtube": "유튜브 링크로 루틴 만들기",
     "create_routine_youtube_subtitle": "유튜브 URL을 붙여넣어 시작",
@@ -41,7 +41,7 @@
     "other": "기타"
   },
   "library": {
-    "title": "내 루틴 보관함",
+    "title": "내 댄스 보관함",
     "group_routines": "루틴 묶어서 저장",
     "delete": "삭제",
     "confirm": "확인",
@@ -156,13 +156,16 @@
     "timeline": "타임라인",
     "start": "Start",
     "end": "End",
-    "routine_list": "Routine list",
-    "add_section": "Add section",
-    "section": "Section",
-    "speed": "Speed",
-    "loop": "Loop",
-    "delay": "Delay",
+    "routine_list": "루틴 목록",
+    "add_section": "구간 추가",
+    "section": "구간",
+    "speed": "재생 속도",
+    "loop": "루프",
+    "delay": "준비 시간",
     "save": "저장",
+    "practice_now": "바로 연습하기",
+    "stop_routine": "연습 중지",
+    "save_routine_button": "루틴 저장하기",
     "save_dialog_title": "루틴 저장",
     "save_success": "루틴이 저장되었습니다.",
     "player_placeholder": "YouTube Player Placeholder",
@@ -174,7 +177,7 @@
     "save_overwrite_hint": "덮어쓰기하면 기존 루틴이 수정되고, Save는 새 루틴으로 저장합니다.",
     "save_name_hint": "연습 모드를 시작하기 전에 이 루틴의 이름을 정해주세요.",
     "overwrite": "덮어쓰기",
-    "set_highlight": "하이라이트/후렴구 지정",
+    "set_highlight": "포인트 구간 지정",
     "mirror_video": "미러 모드 (좌우 반전)"
   },
   "player": {
@@ -182,6 +185,7 @@
     "previous_segment": "이전 구간",
     "rewind_5s": "5초 뒤로",
     "play": "재생",
+    "practice": "연습하기",
     "pause": "일시정지",
     "forward_5s": "5초 앞으로",
     "next_segment": "다음 구간",
@@ -208,7 +212,7 @@
     "infinite": "무한",
     "section_label": "구간",
     "interval_count": "{count}개 구간",
-    "contains_chorus": "후렴구 포함 👑",
+    "contains_chorus": "포인트 구간 포함",
     "cancel": "취소",
     "confirm": "확인",
     "save": "저장",
@@ -220,6 +224,15 @@
     "favorite": "즐겨찾기",
     "unfavorite": "즐겨찾기 해제",
     "favorite_added": "즐겨찾기에 추가했습니다.",
-    "favorite_removed": "즐겨찾기에서 삭제했습니다."
+    "favorite_removed": "즐겨찾기에서 삭제했습니다.",
+    "storage_quota_nudge": "저장 공간이 꽉 찼어요! 내 댄스 보관함에서 예전 연습 기록을 조금 정리해 볼까요?"
+  },
+  "privacy": {
+    "title": "개인정보 안내",
+    "acknowledge": "확인했습니다",
+    "login_checkbox": "댄스 연습 녹화는 기기 내부에서만 처리되며 외부 서버로 전송되지 않음에 동의합니다.",
+    "recording_disclaimer": "본 서비스는 사용자의 댄스 연습 녹화 영상을 기기 내부에서만 처리하며, 외부 서버로 절대 수집하거나 전송하지 않습니다.",
+    "settings_title": "녹화 개인정보 정책",
+    "settings_subtitle": "연습 녹화는 이 기기에만 저장·처리됩니다"
   }
 }

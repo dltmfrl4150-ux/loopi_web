@@ -53,7 +53,6 @@ class PracticeModeScreenState extends State<PracticeModeScreen> {
   Timer? _countdownTimer;
   Timer? _pollTimer;
   Timer? _delayTimer;
-  StreamSubscription<YoutubeVideoState>? _stateSub;
   StreamSubscription<YoutubePlayerValue>? _youtubeValueSub;
   int _countdown = 3;
   bool _ready = false;
@@ -71,6 +70,8 @@ class PracticeModeScreenState extends State<PracticeModeScreen> {
   bool _isAdvancing = false;
   String? _mediaObjectUrl;
   bool _disposing = false;
+  /// Cached media length so section.endSec past EOF (Shorts) still advances.
+  double? _cachedMediaDurationSec;
 
   bool get _youtubeAlive => !_disposing && _youtubeInitialized && mounted;
 
@@ -154,22 +155,24 @@ class PracticeModeScreenState extends State<PracticeModeScreen> {
           _youtubeValueSub = listenYoutubeStream(
             _youtubePlayer.stream,
             (value) {
+              final wasPlaying = _isPlaying;
               final playing = value.playerState == PlayerState.playing ||
                   value.playerState == PlayerState.buffering;
               if (_isPlaying != playing) {
                 setState(() => _isPlaying = playing);
               }
+              // Cue endSeconds / EOF pause — advance while we were playing.
+              if (wasPlaying &&
+                  (value.playerState == PlayerState.ended ||
+                      value.playerState == PlayerState.paused ||
+                      value.playerState == PlayerState.cued)) {
+                unawaited(_checkBoundaryFromPlayerEvent());
+              }
             },
             isAlive: () => _youtubeAlive,
           );
-          _stateSub = listenYoutubeStream(
-            _youtubePlayer.videoStateStream,
-            (state) {
-              if (!_ready) return;
-              _onTime(state.position.inMilliseconds / 1000.0);
-            },
-            isAlive: () => _youtubeAlive,
-          );
+          // Do NOT subscribe to videoStateStream — float time payloads crash
+          // the package (double→Map TypeError). Boundary uses Timer poll only.
           break;
         case SourceType.localVideo:
           if (_currentRoutine.localFilePath != null && !kIsWeb) {
@@ -214,7 +217,10 @@ class PracticeModeScreenState extends State<PracticeModeScreen> {
             }
             _audioPlayer!.onPositionChanged.listen((position) {
               if (!_ready) return;
-              _onTime(position.inMilliseconds / 1000.0);
+              _onTime(
+                position.inMilliseconds / 1000.0,
+                videoDuration: _cachedMediaDurationSec,
+              );
             });
             _audioPlayer!.onPlayerStateChanged.listen((state) {
               if (!mounted) return;
@@ -239,7 +245,13 @@ class PracticeModeScreenState extends State<PracticeModeScreen> {
   void _onVideoPlayerUpdate() {
     if (_videoPlayer == null || !_ready) return;
     final position = _videoPlayer!.value.position.inMilliseconds / 1000.0;
-    _onTime(position);
+    final duration = _videoPlayer!.value.isInitialized
+        ? _videoPlayer!.value.duration.inMilliseconds / 1000.0
+        : _cachedMediaDurationSec;
+    if (duration != null && duration > 1) {
+      _cachedMediaDurationSec = duration;
+    }
+    _onTime(position, videoDuration: _cachedMediaDurationSec);
   }
 
   void _onLocalVideoPlayState() {
@@ -256,6 +268,7 @@ class PracticeModeScreenState extends State<PracticeModeScreen> {
     _segmentIndex = 0;
     _loopsCompleted = 0;
     _segmentFinished = false;
+    _cachedMediaDurationSec = null;
     _ignoreUntil = DateTime.now().add(const Duration(milliseconds: 600));
     _isSeeking = true;
     _isAdvancing = false;
@@ -342,28 +355,88 @@ class PracticeModeScreenState extends State<PracticeModeScreen> {
       _isSeeking = false;
     }
 
-    _pollTimer?.cancel();
-    _pollTimer = Timer.periodic(const Duration(milliseconds: 120), (_) async {
-      if (!_ready || _isSeeking) return;
-      try {
-        final time = await _getCurrentTime();
-        _onTime(time);
-      } catch (_) {}
-    });
+    _armBoundaryPoll();
   }
 
   Future<double> _getCurrentTime() async {
-    switch (_currentRoutine.sourceType) {
-      case SourceType.youtube:
-        return await _yt(() => _youtubePlayer.currentTime) ?? 0;
-      case SourceType.localVideo:
-        final position = _videoPlayer?.value.position.inMilliseconds;
-        return position != null ? position / 1000.0 : 0;
-      case SourceType.audio:
-        final position = await _audioPlayer?.getCurrentPosition();
-        final positionMs = position?.inMilliseconds;
-        return positionMs != null ? positionMs / 1000.0 : 0;
+    try {
+      switch (_currentRoutine.sourceType) {
+        case SourceType.youtube:
+          return await _yt(() => _youtubePlayer.currentTime)
+                  .timeout(const Duration(milliseconds: 500), onTimeout: () => null) ??
+              0;
+        case SourceType.localVideo:
+          final position = _videoPlayer?.value.position.inMilliseconds;
+          return position != null ? position / 1000.0 : 0;
+        case SourceType.audio:
+          final position = await _audioPlayer?.getCurrentPosition();
+          final positionMs = position?.inMilliseconds;
+          return positionMs != null ? positionMs / 1000.0 : 0;
+      }
+    } catch (e) {
+      debugPrint('[LOOPI] playback currentTime ignored: $e');
+      return 0;
     }
+  }
+
+  Future<double?> _mediaDurationSec() async {
+    if (_cachedMediaDurationSec != null && _cachedMediaDurationSec! > 1) {
+      return _cachedMediaDurationSec;
+    }
+    try {
+      switch (_currentRoutine.sourceType) {
+        case SourceType.youtube:
+          try {
+            final meta = _youtubePlayer.metadata.duration.inMilliseconds / 1000.0;
+            if (meta > 1) {
+              _cachedMediaDurationSec = meta;
+              return meta;
+            }
+          } catch (_) {}
+          final d = await _yt(() => _youtubePlayer.duration)
+              .timeout(const Duration(milliseconds: 800), onTimeout: () => null);
+          if (d != null && d > 1) {
+            _cachedMediaDurationSec = d;
+            return d;
+          }
+          break;
+        case SourceType.localVideo:
+          final player = _videoPlayer;
+          if (player != null && player.value.isInitialized) {
+            final d = player.value.duration.inMilliseconds / 1000.0;
+            if (d > 1) {
+              _cachedMediaDurationSec = d;
+              return d;
+            }
+          }
+          break;
+        case SourceType.audio:
+          final d = await _audioPlayer?.getDuration();
+          final sec = (d?.inMilliseconds ?? 0) / 1000.0;
+          if (sec > 1) {
+            _cachedMediaDurationSec = sec;
+            return sec;
+          }
+          break;
+      }
+    } catch (e) {
+      debugPrint('[LOOPI] playback duration ignored: $e');
+    }
+    return _cachedMediaDurationSec;
+  }
+
+  /// Cap authored section.end when it exceeds real Shorts/video length.
+  double _effectiveSectionEnd(RoutineSegment segment, double? videoDuration) {
+    final rawEnd = segment.endSec;
+    final start = segment.startSec;
+    if (videoDuration == null || videoDuration <= 1) return rawEnd;
+    if (rawEnd >= videoDuration - 0.05) {
+      return (videoDuration - 0.35).clamp(start + 0.05, videoDuration);
+    }
+    if (rawEnd > videoDuration) {
+      return (videoDuration - 0.35).clamp(start + 0.05, videoDuration);
+    }
+    return rawEnd;
   }
 
   Future<void> _startSegment(int index) async {
@@ -371,62 +444,146 @@ class PracticeModeScreenState extends State<PracticeModeScreen> {
     _segmentIndex = index;
     _loopsCompleted = 0;
     _segmentFinished = false;
-    _ignoreUntil = DateTime.now().add(const Duration(milliseconds: 500));
     _isSeeking = true;
-    _isAdvancing = false;
-    setState(() {});
-    if (_inWidgetTest) return;
+    _delayPending = true;
+    // Keep advancing/seeking locked for the whole prep delay so the boundary
+    // poll cannot race ahead and skip Section B's delayTime.
+    _ignoreUntil = DateTime.now().add(const Duration(seconds: 30));
+    if (mounted) {
+      setState(() => _isPlaying = false);
+    }
+    if (_inWidgetTest) {
+      _isSeeking = false;
+      _delayPending = false;
+      return;
+    }
     try {
-      // ✨ 세그먼트의 delaySec를 읽어와 대기 시간 계산
-      final delay = _currentRoutine.segments[index].delaySec;
-      final waitTime = Duration(milliseconds: 120 + (delay * 1000));
+      final segment = _currentRoutine.segments[index];
+      final delaySec = segment.delaySec < 0 ? 0 : segment.delaySec;
+      final duration = await _mediaDurationSec();
+      final effectiveEnd = _effectiveSectionEnd(segment, duration);
+      final endSeconds = effectiveEnd > segment.startSec ? effectiveEnd : null;
 
+      // 1) Seek to section start and hold paused on the first frame.
       switch (_currentRoutine.sourceType) {
         case SourceType.youtube:
           await _yt(() => _youtubePlayer.pauseVideo());
-          await _yt(() => _youtubePlayer.setPlaybackRate(_currentRoutine.segments[index].speed));
+          await _yt(() => _youtubePlayer.setPlaybackRate(segment.speed));
+          final videoId = resolveYoutubeVideoId(
+            videoId: _currentRoutine.videoId,
+            videoUrl: _currentRoutine.videoUrl,
+          );
+          if (videoId != null && videoId.isNotEmpty) {
+            try {
+              await _yt(
+                () => _youtubePlayer.cueVideoById(
+                  videoId: videoId,
+                  startSeconds: segment.startSec,
+                  endSeconds: endSeconds,
+                ),
+              );
+            } catch (e) {
+              debugPrint('[LOOPI] playback cue ignored: $e');
+            }
+          }
           await _yt(
             () => _youtubePlayer.seekTo(
-              seconds: _currentRoutine.segments[index].startSec,
+              seconds: segment.startSec,
               allowSeekAhead: true,
             ),
           );
-          await Future<void>.delayed(waitTime);
-          _isSeeking = false;
-          if (!_youtubeAlive) return;
-          await _yt(() => _youtubePlayer.playVideo());
-          if (mounted) setState(() => _isPlaying = true);
+          // Cue/seek can auto-resume on web — force hold on start frame.
+          await _yt(() => _youtubePlayer.pauseVideo());
           break;
         case SourceType.localVideo:
           await _videoPlayer?.pause();
-          await _videoPlayer?.setPlaybackSpeed(_currentRoutine.segments[index].speed);
-          await _videoPlayer?.seekTo(Duration(milliseconds: (_currentRoutine.segments[index].startSec * 1000).toInt()));
-          await Future<void>.delayed(waitTime);
-          _isSeeking = false;
-          await _videoPlayer?.play();
-          if (mounted) setState(() => _isPlaying = true);
+          await _videoPlayer?.setPlaybackSpeed(segment.speed);
+          await _videoPlayer?.seekTo(
+            Duration(milliseconds: (segment.startSec * 1000).toInt()),
+          );
+          await _videoPlayer?.pause();
           break;
         case SourceType.audio:
           await _audioPlayer?.pause();
-          await _audioPlayer?.setPlaybackRate(_currentRoutine.segments[index].speed);
-          await _audioPlayer?.seek(Duration(milliseconds: (_currentRoutine.segments[index].startSec * 1000).toInt()));
-          await Future<void>.delayed(waitTime);
-          _isSeeking = false;
-          await _audioPlayer?.resume();
-          if (mounted) setState(() => _isPlaying = true);
+          await _audioPlayer?.setPlaybackRate(segment.speed);
+          await _audioPlayer?.seek(
+            Duration(milliseconds: (segment.startSec * 1000).toInt()),
+          );
+          await _audioPlayer?.pause();
           break;
       }
-    } catch (_) {
+
+      // 2) Honor Section delayTime before play (0 → short settle only).
+      if (delaySec > 0) {
+        debugPrint(
+          '[LOOPI] playback delay ${delaySec}s before '
+          '${sectionLabelForIndex(index)} play',
+        );
+        _ignoreUntil = DateTime.now().add(Duration(seconds: delaySec + 1));
+        await Future<void>.delayed(Duration(seconds: delaySec));
+      } else {
+        await Future<void>.delayed(const Duration(milliseconds: 120));
+      }
+      if (!_ready || _disposing || !mounted) return;
+
+      // 3) Re-apply speed after delay (cue can reset rate), then play.
+      final speed = segment.speed <= 0 ? 1.0 : segment.speed;
+      switch (_currentRoutine.sourceType) {
+        case SourceType.youtube:
+          if (!_youtubeAlive) return;
+          await _yt(() => _youtubePlayer.setPlaybackRate(speed));
+          await _yt(() => _youtubePlayer.playVideo());
+          break;
+        case SourceType.localVideo:
+          await _videoPlayer?.setPlaybackSpeed(speed);
+          await _videoPlayer?.play();
+          break;
+        case SourceType.audio:
+          await _audioPlayer?.setPlaybackRate(speed);
+          await _audioPlayer?.resume();
+          break;
+      }
+      if (mounted) setState(() => _isPlaying = true);
+      debugPrint(
+        '[LOOPI] playback section ${sectionLabelForIndex(index)} '
+        'start=${segment.startSec} end=${segment.endSec} '
+        'effectiveEnd=$effectiveEnd delaySec=$delaySec speed=$speed',
+      );
+    } catch (e) {
+      debugPrint('[LOOPI] playback startSegment failed: $e');
+    } finally {
       _isSeeking = false;
+      _delayPending = false;
+      _ignoreUntil = DateTime.now().add(const Duration(milliseconds: 400));
+      _armBoundaryPoll();
     }
+  }
+
+  void _armBoundaryPoll() {
     _pollTimer?.cancel();
     _pollTimer = Timer.periodic(const Duration(milliseconds: 120), (_) async {
-      if (!_ready || _isSeeking) return;
+      if (!_ready || _isSeeking || _isAdvancing || _segmentFinished || _disposing) {
+        return;
+      }
       try {
         final time = await _getCurrentTime();
-        _onTime(time);
-      } catch (_) {}
+        final duration = await _mediaDurationSec();
+        _onTime(time, videoDuration: duration);
+      } catch (e) {
+        debugPrint('[LOOPI] playback poll ignored: $e');
+      }
     });
+  }
+
+  Future<void> _checkBoundaryFromPlayerEvent() async {
+    if (!_ready || _isSeeking || _isAdvancing || _segmentFinished) {
+      return;
+    }
+    try {
+      final time = await _getCurrentTime();
+      final duration = await _mediaDurationSec();
+      _onTime(time, videoDuration: duration);
+    } catch (_) {}
   }
 
   Future<void> _jumpToSegment(int index) async {
@@ -496,7 +653,8 @@ class PracticeModeScreenState extends State<PracticeModeScreen> {
     try {
       final currentTime = await _getCurrentTime();
       final newTime = currentTime + seconds;
-      final clampedTime = newTime.clamp(_segment.startSec, _segment.endSec);
+      final effectiveEnd = _effectiveSectionEnd(_segment, _cachedMediaDurationSec);
+      final clampedTime = newTime.clamp(_segment.startSec, effectiveEnd);
       
       switch (_currentRoutine.sourceType) {
         case SourceType.youtube:
@@ -546,27 +704,36 @@ class PracticeModeScreenState extends State<PracticeModeScreen> {
     await _startRoutine(next, immediate: true);
   }
 
-  // Detects end-of-segment: `time + 0.12 < segmentEnd` means "not there yet", so
-  // this fires once `time >= segmentEnd - 0.12`, tolerant of ms/float rounding.
-  void _onTime(double time) {
-    if (!_ready || _delayPending || _isSeeking || _isAdvancing || _segmentFinished) return;
+  // Single-section playback: at effectiveEnd, pause — never auto-advance A→B.
+  void _onTime(double time, {double? videoDuration}) {
+    if (!_ready || _delayPending || _isSeeking || _isAdvancing || _segmentFinished) {
+      return;
+    }
     if (_ignoreUntil != null && DateTime.now().isBefore(_ignoreUntil!)) return;
 
     final segmentStart = _segment.startSec;
-    final segmentEnd = _segment.endSec;
-    if (segmentEnd <= segmentStart) return;
+    final effectiveEnd = _effectiveSectionEnd(_segment, videoDuration ?? _cachedMediaDurationSec);
+    if (effectiveEnd <= segmentStart) return;
     if (time < segmentStart - 0.1) return;
-    if (time + 0.12 < segmentEnd) return;
 
-    unawaited(_advancePastSegment());
+    final atMediaEof = videoDuration != null &&
+        videoDuration > 1 &&
+        time >= videoDuration - 0.4;
+    if (!atMediaEof && time + 0.12 < effectiveEnd) return;
+
+    debugPrint(
+      '[LOOPI] playback section boundary '
+      '${sectionLabelForIndex(_segmentIndex)} time=$time effectiveEnd=$effectiveEnd '
+      'rawEnd=${_segment.endSec} duration=$videoDuration',
+    );
+    unawaited(_finishSingleSectionPlayback());
   }
 
-  /// Repeats the current segment, moves on to the next segment/routine, or
-  /// stops once everything is done. try/finally guarantees `_isAdvancing`
-  /// always clears, even if an awaited player call throws.
-  Future<void> _advancePastSegment() async {
+  /// Honors loopCount within the current section, then pauses. Never advances.
+  Future<void> _finishSingleSectionPlayback() async {
     if (_isAdvancing || _segmentFinished) return;
     _isAdvancing = true;
+    _pollTimer?.cancel();
     try {
       final delaySec = _segment.delaySec;
       final targetLoops = _segment.loopCount == kInfiniteLoop
@@ -584,17 +751,15 @@ class PracticeModeScreenState extends State<PracticeModeScreen> {
         return;
       }
 
-      // Strict termination: cancel further seeks once the target loop count is met.
-      final nextIndex = _segmentIndex + 1;
-      if (nextIndex < _currentRoutine.segments.length) {
-        await _startSegment(nextIndex);
-      } else {
-        _segmentFinished = true;
-        _pollTimer?.cancel();
-        _pollTimer = null;
-        if (mounted) setState(() => _isPlaying = false);
-        await pausePlayback();
-      }
+      _segmentFinished = true;
+      _pollTimer?.cancel();
+      _pollTimer = null;
+      if (mounted) setState(() => _isPlaying = false);
+      await pausePlayback();
+      debugPrint(
+        '[LOOPI] single-section playback complete '
+        '${sectionLabelForIndex(_segmentIndex)} — paused',
+      );
     } finally {
       _isAdvancing = false;
     }
@@ -607,6 +772,7 @@ class PracticeModeScreenState extends State<PracticeModeScreen> {
     try {
       switch (_currentRoutine.sourceType) {
         case SourceType.youtube:
+          await _yt(() => _youtubePlayer.pauseVideo());
           await _yt(() => _youtubePlayer.setPlaybackRate(_segment.speed));
           await _yt(
             () => _youtubePlayer.seekTo(
@@ -614,43 +780,58 @@ class PracticeModeScreenState extends State<PracticeModeScreen> {
               allowSeekAhead: true,
             ),
           );
+          await _yt(() => _youtubePlayer.pauseVideo());
           break;
         case SourceType.localVideo:
+          await _videoPlayer?.pause();
           await _videoPlayer?.setPlaybackSpeed(_segment.speed);
           await _videoPlayer?.seekTo(Duration(milliseconds: (_segment.startSec * 1000).toInt()));
+          await _videoPlayer?.pause();
           break;
         case SourceType.audio:
+          await _audioPlayer?.pause();
           await _audioPlayer?.setPlaybackRate(_segment.speed);
           await _audioPlayer?.seek(Duration(milliseconds: (_segment.startSec * 1000).toInt()));
+          await _audioPlayer?.pause();
           break;
       }
     } catch (_) {}
     _isSeeking = false;
     try {
+      final speed = _segment.speed <= 0 ? 1.0 : _segment.speed;
       switch (_currentRoutine.sourceType) {
         case SourceType.youtube:
+          await _yt(() => _youtubePlayer.setPlaybackRate(speed));
           await _yt(() => _youtubePlayer.playVideo());
           break;
         case SourceType.localVideo:
+          await _videoPlayer?.setPlaybackSpeed(speed);
           await _videoPlayer?.play();
           break;
         case SourceType.audio:
+          await _audioPlayer?.setPlaybackRate(speed);
           await _audioPlayer?.resume();
           break;
       }
+      if (mounted) setState(() => _isPlaying = true);
     } catch (_) {}
   }
 
   Future<void> _replayWithDelay(int delaySec) async {
-    await _waitDelay(delaySec);
+    final seconds = delaySec < 0 ? 0 : delaySec;
+    if (seconds > 0) {
+      await _waitDelay(seconds);
+    } else {
+      await Future<void>.delayed(const Duration(milliseconds: 120));
+    }
     if (!_ready || !mounted) return;
     await _replayCurrent();
   }
 
   Future<void> _startSegmentWithDelay(int index, int delaySec) async {
-    await _waitDelay(delaySec);
+    // Delay is applied inside [_startSegment] from the section's delaySec.
     if (!_ready || !mounted) return;
-    _startSegment(index);
+    await _startSegment(index);
   }
 
   Future<void> _advanceToNextRoutine(int delaySec) async {
@@ -795,9 +976,7 @@ class PracticeModeScreenState extends State<PracticeModeScreen> {
     _countdownTimer?.cancel();
     _pollTimer?.cancel();
     _delayTimer?.cancel();
-    _stateSub?.cancel();
     _youtubeValueSub?.cancel();
-    _stateSub = null;
     _youtubeValueSub = null;
     if (_youtubeInitialized) {
       unawaited(closeYoutubePlayerSafely(_youtubePlayer));
@@ -987,6 +1166,44 @@ class PracticeModeScreenState extends State<PracticeModeScreen> {
 
         return Column(
           children: [
+            // YouTube ToS: countdown must not opaque-cover the iframe logo/controls.
+            if (!_ready)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+                child: Material(
+                  color: Colors.black.withValues(alpha: 0.75),
+                  borderRadius: BorderRadius.circular(12),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Text(
+                          'player.get_ready'.tr(),
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 16,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        CircleAvatar(
+                          radius: 18,
+                          backgroundColor: LoopiColors.purple,
+                          child: Text(
+                            '$_countdown',
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 16,
+                              fontWeight: FontWeight.w800,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
             Expanded(
               child: Center(
                 child: ConstrainedBox(
@@ -996,45 +1213,10 @@ class PracticeModeScreenState extends State<PracticeModeScreen> {
                   ),
                   child: AspectRatio(
                     aspectRatio: _playerAspectRatio,
-                    child: Stack(
-                      fit: StackFit.expand,
-                      children: [
-                        Transform.flip(
-                          flipX: _currentRoutine.isMirroredOn &&
-                              _currentRoutine.sourceType != SourceType.audio,
-                          child: mediaWidget,
-                        ),
-                        if (!_ready)
-                          ColoredBox(
-                            color: Colors.black.withValues(alpha: 0.55),
-                            child: Column(
-                              mainAxisAlignment: MainAxisAlignment.center,
-                              children: [
-                                Text(
-                                  'player.get_ready'.tr(),
-                                  style: const TextStyle(
-                                    color: Colors.white,
-                                    fontSize: 22,
-                                    fontWeight: FontWeight.w700,
-                                  ),
-                                ),
-                                const SizedBox(height: 16),
-                                CircleAvatar(
-                                  radius: 42,
-                                  backgroundColor: LoopiColors.purple,
-                                  child: Text(
-                                    '$_countdown',
-                                    style: const TextStyle(
-                                      color: Colors.white,
-                                      fontSize: 36,
-                                      fontWeight: FontWeight.w800,
-                                    ),
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                      ],
+                    child: Transform.flip(
+                      flipX: _currentRoutine.isMirroredOn &&
+                          _currentRoutine.sourceType != SourceType.audio,
+                      child: mediaWidget,
                     ),
                   ),
                 ),

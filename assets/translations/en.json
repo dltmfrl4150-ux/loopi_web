@@ -17,11 +17,11 @@
     "quick_action_subtitle": "Register YouTube Link",
     "recent_routines": "Recently Practiced Routines",
     "view_all": "View All",
-    "no_routines": "No saved routines yet.\nShall we create your first routine?",
+    "no_routines": "No saved routines yet! Tap a button above to create your first one.",
     "start_practice": "Start Now",
     "tab_home": "Home",
     "tab_studio": "Studio",
-    "tab_community": "Community",
+    "tab_community": "Hub",
     "tab_settings": "Settings",
     "create_routine_youtube": "Create with YouTube Link",
     "create_routine_youtube_subtitle": "Paste YouTube URL to start",
@@ -41,7 +41,7 @@
     "other": "Other"
   },
   "library": {
-    "title": "My Routine Library",
+    "title": "My Dance Library",
     "group_routines": "Group Routines",
     "delete": "Delete",
     "confirm": "Confirm",
@@ -159,10 +159,13 @@
     "routine_list": "Routine list",
     "add_section": "Add section",
     "section": "Section",
-    "speed": "Speed",
+    "speed": "Playback speed",
     "loop": "Loop",
-    "delay": "Delay",
+    "delay": "Prep time",
     "save": "Save",
+    "practice_now": "Practice Now",
+    "stop_routine": "Stop Routine",
+    "save_routine_button": "Save Routine",
     "save_dialog_title": "Save Routine",
     "save_success": "Routine has been saved.",
     "player_placeholder": "YouTube Player Placeholder",
@@ -174,7 +177,7 @@
     "save_overwrite_hint": "Overwrite updates the existing routine. Save creates a new one.",
     "save_name_hint": "Name this loop routine before starting Practice Mode.",
     "overwrite": "Overwrite",
-    "set_highlight": "Set as Highlight (Chorus)",
+    "set_highlight": "Mark as point section",
     "mirror_video": "Mirror mode (flip horizontally)"
   },
   "player": {
@@ -182,6 +185,7 @@
     "previous_segment": "Previous Segment",
     "rewind_5s": "Rewind 5s",
     "play": "Play",
+    "practice": "Practice",
     "pause": "Pause",
     "forward_5s": "Forward 5s",
     "next_segment": "Next Segment",
@@ -207,8 +211,8 @@
     "seconds": "s",
     "infinite": "Infinite",
     "section_label": "Section",
-    "interval_count": "{count} intervals",
-    "contains_chorus": "Contains Chorus 👑",
+    "interval_count": "{count} sections",
+    "contains_chorus": "Includes point section",
     "cancel": "Cancel",
     "confirm": "Confirm",
     "save": "Save",
@@ -220,6 +224,15 @@
     "favorite": "Favorites",
     "unfavorite": "Remove favorite",
     "favorite_added": "Added to favorites.",
-    "favorite_removed": "Removed from favorites."
+    "favorite_removed": "Removed from favorites.",
+    "storage_quota_nudge": "Storage is full! Want to clear older practice takes in My Dance Library?"
+  },
+  "privacy": {
+    "title": "Privacy notice",
+    "acknowledge": "Got it",
+    "login_checkbox": "I agree that dance practice recordings are processed only on this device and are not sent to external servers.",
+    "recording_disclaimer": "This service processes your recorded dance practice videos only on your local device and never collects or transmits them to external servers.",
+    "settings_title": "Recording privacy",
+    "settings_subtitle": "Practice recordings stay and are processed on this device only"
   }
 }

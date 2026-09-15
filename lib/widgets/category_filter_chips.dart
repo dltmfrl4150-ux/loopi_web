@@ -25,32 +25,41 @@ class CategoryFilterBar extends StatelessWidget {
       RoutineCategory.other,
     ];
 
-    return SizedBox(
-      height: 48,
-      child: ListView.separated(
-        scrollDirection: Axis.horizontal,
-        padding: padding,
-        itemCount: chips.length,
-        separatorBuilder: (_, _) => const SizedBox(width: 8),
-        itemBuilder: (context, index) {
-          final id = chips[index];
-          final isSelected = selected == id;
-          return FilterChip(
-            label: Text(RoutineCategory.labelKey(id).tr()),
-            selected: isSelected,
-            showCheckmark: false,
-            selectedColor: LoopiColors.purple.withValues(alpha: 0.18),
-            backgroundColor: Colors.white,
-            side: BorderSide(
-              color: isSelected ? LoopiColors.purple : LoopiColors.line,
+    // Avoid a fixed short height — Material FilterChips were vertically clipped at 48px.
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      padding: padding,
+      child: Row(
+        children: [
+          for (var i = 0; i < chips.length; i++) ...[
+            if (i > 0) const SizedBox(width: 8),
+            Builder(
+              builder: (context) {
+                final id = chips[i];
+                final isSelected = selected == id;
+                return FilterChip(
+                  label: Text(RoutineCategory.labelKey(id).tr()),
+                  selected: isSelected,
+                  showCheckmark: false,
+                  materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  visualDensity: VisualDensity.compact,
+                  padding: const EdgeInsets.symmetric(horizontal: 4),
+                  labelPadding: const EdgeInsets.symmetric(horizontal: 8),
+                  selectedColor: LoopiColors.purple.withValues(alpha: 0.18),
+                  backgroundColor: Colors.white,
+                  side: BorderSide(
+                    color: isSelected ? LoopiColors.purple : LoopiColors.line,
+                  ),
+                  labelStyle: TextStyle(
+                    color: isSelected ? LoopiColors.deepPurple : LoopiColors.ink,
+                    fontWeight: isSelected ? FontWeight.w800 : FontWeight.w600,
+                  ),
+                  onSelected: (_) => onSelected(id),
+                );
+              },
             ),
-            labelStyle: TextStyle(
-              color: isSelected ? LoopiColors.deepPurple : LoopiColors.ink,
-              fontWeight: isSelected ? FontWeight.w800 : FontWeight.w600,
-            ),
-            onSelected: (_) => onSelected(id),
-          );
-        },
+          ],
+        ],
       ),
     );
   }

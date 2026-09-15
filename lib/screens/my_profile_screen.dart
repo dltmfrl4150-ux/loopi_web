@@ -8,6 +8,7 @@ import '../services/storage_service.dart';
 import '../state/routine_library.dart';
 import '../state/user_state.dart';
 import '../theme/loopi_colors.dart';
+import '../widgets/privacy_notice.dart';
 import '../widgets/cached_remote_image.dart';
 import 'paywall_screen.dart';
 import 'social_login_screen.dart';
@@ -416,14 +417,44 @@ class _MyProfileScreenState extends State<MyProfileScreen> {
               const SizedBox(height: 24),
               _sectionLabel('settings.title'.tr()),
               Card(
-                child: ListTile(
-                  leading: const Icon(Icons.language, color: LoopiColors.purple),
-                  title: Text('settings.language'.tr()),
-                  subtitle: Text(
-                    '${'settings.language_subtitle'.tr()} · ${context.locale.languageCode == 'ko' ? 'settings.korean'.tr() : 'settings.english'.tr()}',
-                  ),
-                  trailing: const Icon(Icons.chevron_right),
-                  onTap: _openLanguageDialog,
+                child: Column(
+                  children: [
+                    ListTile(
+                      leading: const Icon(Icons.language, color: LoopiColors.purple),
+                      title: Text('settings.language'.tr()),
+                      subtitle: Text(
+                        '${'settings.language_subtitle'.tr()} · ${context.locale.languageCode == 'ko' ? 'settings.korean'.tr() : 'settings.english'.tr()}',
+                      ),
+                      trailing: const Icon(Icons.chevron_right),
+                      onTap: _openLanguageDialog,
+                    ),
+                    const Divider(height: 1),
+                    ListTile(
+                      leading: const Icon(Icons.privacy_tip_outlined, color: LoopiColors.purple),
+                      title: Text('privacy.settings_title'.tr()),
+                      subtitle: Text('privacy.settings_subtitle'.tr()),
+                      onTap: () {
+                        showDialog<void>(
+                          context: context,
+                          builder: (dialogContext) => AlertDialog(
+                            title: Text('privacy.title'.tr()),
+                            content: const SingleChildScrollView(
+                              child: PrivacyDisclaimerText(
+                                textAlign: TextAlign.start,
+                                fontSize: 14,
+                              ),
+                            ),
+                            actions: [
+                              TextButton(
+                                onPressed: () => Navigator.pop(dialogContext),
+                                child: Text('common.close'.tr()),
+                              ),
+                            ],
+                          ),
+                        );
+                      },
+                    ),
+                  ],
                 ),
               ),
               const SizedBox(height: 24),
