@@ -83,6 +83,7 @@
   "community": {
     "search_hint": "루틴 또는 쇼케이스 검색",
     "tab_routines": "루틴",
+    "tab_classes": "클래스",
     "tab_showcase": "쇼케이스",
     "empty_routines": "아직 공유된 루틴이 없습니다.",
     "empty_showcase": "아직 공유된 쇼케이스가 없습니다.",
@@ -102,6 +103,8 @@
     "login_linked": "{email} · {provider} 연동됨",
     "my_feed": "내 커뮤니티 피드",
     "my_feed_subtitle": "공유한 루틴과 쇼케이스 관리",
+    "my_classes": "내 클래스",
+    "my_classes_subtitle": "내가 만든 클래스 관리",
     "my_subscription": "나의 구독",
     "plan_pro": "루피 Pro 이용 중",
     "plan_free": "현재 Free 플랜 이용 중",
@@ -234,5 +237,31 @@
     "recording_disclaimer": "본 서비스는 사용자의 댄스 연습 녹화 영상을 기기 내부에서만 처리하며, 외부 서버로 절대 수집하거나 전송하지 않습니다.",
     "settings_title": "녹화 개인정보 정책",
     "settings_subtitle": "연습 녹화는 이 기기에만 저장·처리됩니다"
+  },
+  "class": {
+    "empty": "아직 등록된 클래스가 없습니다.",
+    "empty_instructor": "이 강사가 만든 클래스가 없습니다.",
+    "badge_free": "무료",
+    "price_won": "{price}원",
+    "section_count": "구간 {count}개",
+    "student_count": "수강생 {count}명",
+    "lessons": "레슨",
+    "unit_sections": "연습 구간 {count}개",
+    "enroll_and_start": "수강 후 시작하기",
+    "continue_learning": "이어서 학습하기",
+    "open_as_instructor": "강사로 열기",
+    "sort_latest": "최신순",
+    "sort_oldest": "오래된순",
+    "sort_popular": "인기순",
+    "edit_coming_soon": "클래스 편집은 곧 제공됩니다.",
+    "delete_title": "클래스를 삭제할까요?",
+    "delete_body": "삭제하면 목록에서 사라집니다. 이 작업은 되돌릴 수 없습니다.",
+    "lane_lecture": "📺 강의",
+    "mode_lecture": "강의 모드",
+    "mode_section": "연습 구간 {label}",
+    "sequential": "순차재생",
+    "sequential_hint": "강의가 끝나면 구간 A → B → C 순으로 이어집니다.",
+    "selective_hint": "원하는 강의 또는 구간 버튼을 눌러 바로 전환합니다.",
+    "no_practice_routine": "이 레슨에 연결된 연습 루틴이 없습니다."
   }
 }

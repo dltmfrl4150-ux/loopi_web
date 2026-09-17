@@ -9,8 +9,10 @@ import 'package:flutter/material.dart';
 import 'package:video_player/video_player.dart';
 
 import '../models/community_models.dart';
+import '../models/class_models.dart';
 import '../models/routine_category.dart';
 import '../models/routine_models.dart';
+import '../services/class_catalog.dart';
 import '../services/database_service.dart';
 import '../utils/cached_video.dart';
 import '../utils/youtube_id.dart';
@@ -19,6 +21,8 @@ import '../state/user_state.dart';
 import '../theme/loopi_colors.dart';
 import '../widgets/cached_remote_image.dart';
 import '../widgets/category_filter_chips.dart';
+import '../widgets/class_course_card.dart';
+import 'class_detail_screen.dart';
 import 'routine_player_screen.dart';
 import 'user_profile_screen.dart';
 
@@ -70,7 +74,7 @@ class CommunityScreenState extends State<CommunityScreen> with SingleTickerProvi
   @override
   void initState() {
     super.initState();
-    _tabs = TabController(length: 2, vsync: this);
+    _tabs = TabController(length: 3, vsync: this);
     widget.refreshTick?.addListener(_onExternalRefresh);
     _reloadAll();
   }
@@ -368,8 +372,11 @@ class CommunityScreenState extends State<CommunityScreen> with SingleTickerProvi
         TabBar(
           controller: _tabs,
           labelColor: LoopiColors.deepPurple,
+          isScrollable: true,
+          tabAlignment: TabAlignment.start,
           tabs: [
             Tab(text: 'community.tab_routines'.tr()),
+            Tab(text: 'community.tab_classes'.tr()),
             Tab(text: 'community.tab_showcase'.tr()),
           ],
         ),
@@ -392,6 +399,16 @@ class CommunityScreenState extends State<CommunityScreen> with SingleTickerProvi
                   authorName: post.authorName,
                 ),
               ),
+              _ClassesTab(
+                category: _category,
+                onOpen: (course) {
+                  Navigator.of(context).push(
+                    MaterialPageRoute<void>(
+                      builder: (_) => ClassDetailScreen(course: course),
+                    ),
+                  );
+                },
+              ),
               _ShowcaseTab(
                 loading: _showcaseLoading,
                 loadingMore: _showcaseLoadingMore,
@@ -412,6 +429,52 @@ class CommunityScreenState extends State<CommunityScreen> with SingleTickerProvi
           ),
         ),
       ],
+    );
+  }
+}
+
+class _ClassesTab extends StatelessWidget {
+  const _ClassesTab({
+    required this.category,
+    required this.onOpen,
+  });
+
+  final String category;
+  final ValueChanged<ClassCourse> onOpen;
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: ClassCatalog.instance,
+      builder: (context, _) {
+        final courses = ClassCatalog.instance.listAll(category: category);
+        if (courses.isEmpty) {
+          return Center(child: Text('class.empty'.tr()));
+        }
+        final width = MediaQuery.sizeOf(context).width;
+        final crossAxisCount = width >= 1000
+            ? 3
+            : width >= 640
+                ? 2
+                : 1;
+        return GridView.builder(
+          padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
+          gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+            crossAxisCount: crossAxisCount,
+            mainAxisSpacing: 12,
+            crossAxisSpacing: 12,
+            childAspectRatio: crossAxisCount == 1 ? 1.55 : 0.92,
+          ),
+          itemCount: courses.length,
+          itemBuilder: (context, index) {
+            final course = courses[index];
+            return ClassCourseCard(
+              course: course,
+              onTap: () => onOpen(course),
+            );
+          },
+        );
+      },
     );
   }
 }

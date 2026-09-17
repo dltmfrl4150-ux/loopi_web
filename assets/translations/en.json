@@ -83,6 +83,7 @@
   "community": {
     "search_hint": "Search routines or showcases",
     "tab_routines": "Routines",
+    "tab_classes": "Classes",
     "tab_showcase": "Showcase",
     "empty_routines": "No shared routines yet.",
     "empty_showcase": "No shared showcases yet.",
@@ -102,6 +103,8 @@
     "login_linked": "{email} · Linked with {provider}",
     "my_feed": "My community feed",
     "my_feed_subtitle": "Manage shared routines and showcases",
+    "my_classes": "My classes",
+    "my_classes_subtitle": "Manage classes you created",
     "my_subscription": "My Subscription",
     "plan_pro": "Using LOOPI Pro",
     "plan_free": "Currently on the Free plan",
@@ -234,5 +237,31 @@
     "recording_disclaimer": "This service processes your recorded dance practice videos only on your local device and never collects or transmits them to external servers.",
     "settings_title": "Recording privacy",
     "settings_subtitle": "Practice recordings stay and are processed on this device only"
+  },
+  "class": {
+    "empty": "No classes yet.",
+    "empty_instructor": "This instructor has no classes yet.",
+    "badge_free": "Free",
+    "price_won": "₩{price}",
+    "section_count": "{count} sections",
+    "student_count": "{count} students",
+    "lessons": "Lessons",
+    "unit_sections": "{count} practice sections",
+    "enroll_and_start": "Enroll & start",
+    "continue_learning": "Continue learning",
+    "open_as_instructor": "Open as instructor",
+    "sort_latest": "Latest",
+    "sort_oldest": "Oldest",
+    "sort_popular": "Popular",
+    "edit_coming_soon": "Class editing is coming soon.",
+    "delete_title": "Delete this class?",
+    "delete_body": "It will be removed from the list. This cannot be undone.",
+    "lane_lecture": "📺 Lecture",
+    "mode_lecture": "Lecture mode",
+    "mode_section": "Practice section {label}",
+    "sequential": "Sequential",
+    "sequential_hint": "After the lecture, sections play A → B → C in order.",
+    "selective_hint": "Tap any lecture or section button to switch instantly.",
+    "no_practice_routine": "No practice routine is linked to this lesson."
   }
 }

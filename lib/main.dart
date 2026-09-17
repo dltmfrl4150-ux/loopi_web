@@ -6,6 +6,7 @@ import 'package:easy_localization/easy_localization.dart';
 import 'firebase_options.dart';
 import 'screens/auth_gate.dart';
 import 'services/auth_service.dart';
+import 'services/player_remote_channel.dart';
 import 'state/routine_library.dart';
 import 'state/user_state.dart';
 import 'theme/loopi_colors.dart';
@@ -14,6 +15,8 @@ import 'utils/app_locale.dart';
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await EasyLocalization.ensureInitialized();
+  // Wear / native remote channel (no-op on web until a plugin is present).
+  PlayerRemoteChannelBridge.startListening();
   try {
     await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
     FirebaseBootstrap.initialized = true;

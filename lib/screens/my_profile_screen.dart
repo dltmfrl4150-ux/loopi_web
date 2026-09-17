@@ -10,6 +10,10 @@ import '../state/user_state.dart';
 import '../theme/loopi_colors.dart';
 import '../widgets/privacy_notice.dart';
 import '../widgets/cached_remote_image.dart';
+import '../widgets/class_course_card.dart';
+import '../models/class_models.dart';
+import '../services/class_catalog.dart';
+import 'class_detail_screen.dart';
 import 'paywall_screen.dart';
 import 'social_login_screen.dart';
 import 'user_profile_screen.dart';
@@ -182,6 +186,16 @@ class _MyProfileScreenState extends State<MyProfileScreen> {
           authorId: uid,
           authorName: _userState.nickname,
           library: widget.library,
+          userState: widget.userState,
+        ),
+      ),
+    );
+  }
+
+  Future<void> _openMyClasses() async {
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => _MyClassesManageScreen(
           userState: widget.userState,
         ),
       ),
@@ -405,6 +419,14 @@ class _MyProfileScreenState extends State<MyProfileScreen> {
                     ),
                     const Divider(height: 1),
                     ListTile(
+                      leading: const Icon(Icons.school_outlined, color: LoopiColors.purple),
+                      title: Text('profile.my_classes'.tr()),
+                      subtitle: Text('profile.my_classes_subtitle'.tr()),
+                      trailing: const Icon(Icons.chevron_right),
+                      onTap: _openMyClasses,
+                    ),
+                    const Divider(height: 1),
+                    ListTile(
                       leading: const Text('💳', style: TextStyle(fontSize: 20)),
                       title: Text('profile.my_subscription'.tr()),
                       subtitle: Text(isPro ? 'profile.plan_pro_short'.tr() : 'profile.plan_free_short'.tr()),
@@ -614,6 +636,105 @@ class _PlanBadge extends StatelessWidget {
           fontWeight: FontWeight.w800,
           fontSize: 12,
         ),
+      ),
+    );
+  }
+}
+
+class _MyClassesManageScreen extends StatefulWidget {
+  const _MyClassesManageScreen({required this.userState});
+
+  final UserSubscriptionState userState;
+
+  @override
+  State<_MyClassesManageScreen> createState() => _MyClassesManageScreenState();
+}
+
+class _MyClassesManageScreenState extends State<_MyClassesManageScreen> {
+  ClassSortOrder _sort = ClassSortOrder.latest;
+
+  @override
+  Widget build(BuildContext context) {
+    final uid = widget.userState.uid ?? '';
+    return Scaffold(
+      appBar: AppBar(title: Text('profile.my_classes'.tr())),
+      body: AnimatedBuilder(
+        animation: ClassCatalog.instance,
+        builder: (context, _) {
+          final courses = <ClassCourse>[
+            ...ClassCatalog.instance.listForInstructor(uid, sort: _sort),
+            // Demo authoring identity until instructor accounts are wired.
+            ...ClassCatalog.instance.listForInstructor('instructor_loopi', sort: _sort),
+          ];
+          final unique = <ClassCourse>[];
+          for (final c in courses) {
+            if (unique.every((e) => e.id != c.id)) unique.add(c);
+          }
+          return Column(
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+                child: SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  child: Row(
+                    children: [
+                      for (final entry in <(ClassSortOrder, String)>[
+                        (ClassSortOrder.latest, 'class.sort_latest'),
+                        (ClassSortOrder.oldest, 'class.sort_oldest'),
+                        (ClassSortOrder.popular, 'class.sort_popular'),
+                      ])
+                        Padding(
+                          padding: const EdgeInsets.only(right: 8),
+                          child: ChoiceChip(
+                            label: Text(entry.$2.tr()),
+                            selected: _sort == entry.$1,
+                            onSelected: (_) => setState(() => _sort = entry.$1),
+                            selectedColor: LoopiColors.purple.withValues(alpha: 0.18),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+              Expanded(
+                child: unique.isEmpty
+                    ? Center(child: Text('class.empty_instructor'.tr()))
+                    : ListView.builder(
+                        padding: const EdgeInsets.all(16),
+                        itemCount: unique.length,
+                        itemBuilder: (context, index) {
+                          final course = unique[index];
+                          return Padding(
+                            padding: const EdgeInsets.only(bottom: 12),
+                            child: ClassCourseCard(
+                              course: course,
+                              showOwnerActions: true,
+                              onTap: () {
+                                Navigator.of(context).push(
+                                  MaterialPageRoute<void>(
+                                    builder: (_) => ClassDetailScreen(
+                                      course: course,
+                                      isOwn: true,
+                                    ),
+                                  ),
+                                );
+                              },
+                              onEdit: () {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  SnackBar(content: Text('class.edit_coming_soon'.tr())),
+                                );
+                              },
+                              onDelete: () {
+                                ClassCatalog.instance.delete(course.id);
+                              },
+                            ),
+                          );
+                        },
+                      ),
+              ),
+            ],
+          );
+        },
       ),
     );
   }

@@ -4,14 +4,18 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:easy_localization/easy_localization.dart';
 import 'package:flutter/material.dart';
 
+import '../models/class_models.dart';
 import '../models/community_models.dart';
 import '../models/routine_models.dart';
+import '../services/class_catalog.dart';
 import '../services/database_service.dart';
 import '../state/routine_library.dart';
 import '../state/user_state.dart';
 import '../theme/loopi_colors.dart';
 import '../utils/youtube_id.dart';
 import '../widgets/cached_remote_image.dart';
+import '../widgets/class_course_card.dart';
+import 'class_detail_screen.dart';
 import 'routine_player_screen.dart';
 
 class UserProfileScreen extends StatefulWidget {
@@ -48,6 +52,7 @@ class _UserProfileScreenState extends State<UserProfileScreen> with SingleTicker
   bool _loading = true;
   bool _selecting = false;
   bool _busy = false;
+  ClassSortOrder _classSort = ClassSortOrder.latest;
   final Set<String> _selectedRoutineIds = {};
   final Set<String> _selectedShowcaseIds = {};
 
@@ -66,7 +71,7 @@ class _UserProfileScreenState extends State<UserProfileScreen> with SingleTicker
   @override
   void initState() {
     super.initState();
-    _tabs = TabController(length: 2, vsync: this);
+    _tabs = TabController(length: 3, vsync: this);
     _tabs.addListener(() {
       if (mounted) setState(() {});
     });
@@ -400,9 +405,12 @@ class _UserProfileScreenState extends State<UserProfileScreen> with SingleTicker
           TabBar(
             controller: _tabs,
             labelColor: LoopiColors.deepPurple,
-            tabs: const [
-              Tab(text: '루틴'),
-              Tab(text: '쇼케이스'),
+            isScrollable: true,
+            tabAlignment: TabAlignment.start,
+            tabs: [
+              Tab(text: 'community.tab_routines'.tr()),
+              Tab(text: 'community.tab_classes'.tr()),
+              Tab(text: 'community.tab_showcase'.tr()),
             ],
           ),
           Expanded(
@@ -412,6 +420,7 @@ class _UserProfileScreenState extends State<UserProfileScreen> with SingleTicker
                     controller: _tabs,
                     children: [
                       _buildRoutinesTab(),
+                      _buildClassesTab(),
                       _buildShowcaseTab(crossAxisCount),
                     ],
                   ),
@@ -557,6 +566,118 @@ class _UserProfileScreenState extends State<UserProfileScreen> with SingleTicker
           },
         ),
       ),
+    );
+  }
+
+  Widget _buildClassesTab() {
+    final instructorId = widget.authorId;
+    // Demo seed uses instructor_loopi / instructor_mira; also show classes for
+    // the signed-in user's own id when they match authored content.
+    final ids = <String>{instructorId, if (_isOwnProfile) 'instructor_loopi'};
+    return AnimatedBuilder(
+      animation: ClassCatalog.instance,
+      builder: (context, _) {
+        final courses = <ClassCourse>[];
+        for (final id in ids) {
+          for (final course in ClassCatalog.instance.listForInstructor(id, sort: _classSort)) {
+            if (courses.every((c) => c.id != course.id)) courses.add(course);
+          }
+        }
+        return Column(
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 10, 16, 4),
+              child: SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: Row(
+                  children: [
+                    for (final entry in <(ClassSortOrder, String)>[
+                      (ClassSortOrder.latest, 'class.sort_latest'),
+                      (ClassSortOrder.oldest, 'class.sort_oldest'),
+                      (ClassSortOrder.popular, 'class.sort_popular'),
+                    ])
+                      Padding(
+                        padding: const EdgeInsets.only(right: 8),
+                        child: ChoiceChip(
+                          label: Text(entry.$2.tr()),
+                          selected: _classSort == entry.$1,
+                          onSelected: (_) => setState(() => _classSort = entry.$1),
+                          selectedColor: LoopiColors.purple.withValues(alpha: 0.18),
+                          labelStyle: TextStyle(
+                            color: _classSort == entry.$1 ? LoopiColors.deepPurple : null,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ),
+            Expanded(
+              child: courses.isEmpty
+                  ? Center(child: Text('class.empty_instructor'.tr()))
+                  : ListView.builder(
+                      padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
+                      itemCount: courses.length,
+                      itemBuilder: (context, index) {
+                        final course = courses[index];
+                        return Padding(
+                          padding: const EdgeInsets.only(bottom: 12),
+                          child: ClassCourseCard(
+                            course: course,
+                            showOwnerActions: _isOwnProfile,
+                            onTap: () {
+                              Navigator.of(context).push(
+                                MaterialPageRoute<void>(
+                                  builder: (_) => ClassDetailScreen(
+                                    course: course,
+                                    isOwn: _isOwnProfile,
+                                  ),
+                                ),
+                              );
+                            },
+                            onEdit: _isOwnProfile
+                                ? () {
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      SnackBar(content: Text('class.edit_coming_soon'.tr())),
+                                    );
+                                  }
+                                : null,
+                            onDelete: _isOwnProfile
+                                ? () async {
+                                    final ok = await showDialog<bool>(
+                                      context: context,
+                                      builder: (dialogContext) => AlertDialog(
+                                        title: Text('class.delete_title'.tr()),
+                                        content: Text('class.delete_body'.tr()),
+                                        actions: [
+                                          TextButton(
+                                            onPressed: () => Navigator.pop(dialogContext, false),
+                                            child: Text('common.cancel'.tr()),
+                                          ),
+                                          FilledButton(
+                                            onPressed: () => Navigator.pop(dialogContext, true),
+                                            style: FilledButton.styleFrom(
+                                              backgroundColor: Colors.redAccent,
+                                            ),
+                                            child: Text('common.delete'.tr()),
+                                          ),
+                                        ],
+                                      ),
+                                    );
+                                    if (ok == true) {
+                                      ClassCatalog.instance.delete(course.id);
+                                    }
+                                  }
+                                : null,
+                          ),
+                        );
+                      },
+                    ),
+            ),
+          ],
+        );
+      },
     );
   }
 

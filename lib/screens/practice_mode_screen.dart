@@ -10,6 +10,7 @@ import 'package:video_player/video_player.dart';
 import 'package:audioplayers/audioplayers.dart' hide PlayerState;
 
 import '../models/routine_models.dart';
+import '../services/player_remote_control.dart';
 import '../state/routine_library.dart';
 import '../theme/loopi_colors.dart';
 import '../utils/cached_video.dart';
@@ -45,7 +46,8 @@ class PracticeModeScreen extends StatefulWidget {
   State<PracticeModeScreen> createState() => PracticeModeScreenState();
 }
 
-class PracticeModeScreenState extends State<PracticeModeScreen> {
+class PracticeModeScreenState extends State<PracticeModeScreen>
+    implements PlayerRemoteHandler {
   late final YoutubePlayerController _youtubePlayer;
   bool _youtubeInitialized = false;
   VideoPlayerController? _videoPlayer;
@@ -111,6 +113,7 @@ class PracticeModeScreenState extends State<PracticeModeScreen> {
   @override
   void initState() {
     super.initState();
+    PlayerRemoteControl.instance.attach(this);
     _playlistIndex = _playlist.indexWhere((routine) => routine.id == widget.routine.id);
     if (_playlistIndex < 0) _playlistIndex = 0;
     _segmentIndex = 0;
@@ -132,6 +135,32 @@ class PracticeModeScreenState extends State<PracticeModeScreen> {
       }
       setState(() => _countdown -= 1);
     });
+  }
+
+  /// Wear / remote channel entry — maps onto existing private controls only.
+  @override
+  Future<void> handleRemoteCommand(PlayerRemoteCommand command) async {
+    if (!mounted || _disposing) return;
+    switch (command) {
+      case PlayerRemoteCommand.play:
+        if (!_isPlaying) await _togglePlayPause();
+        break;
+      case PlayerRemoteCommand.pause:
+        await pausePlayback();
+        break;
+      case PlayerRemoteCommand.togglePlayPause:
+        await _togglePlayPause();
+        break;
+      case PlayerRemoteCommand.reloopSection:
+        await _jumpToSegment(_segmentIndex);
+        break;
+      case PlayerRemoteCommand.nextSection:
+        await _skipToNextSegment();
+        break;
+      case PlayerRemoteCommand.previousSection:
+        await _skipToPreviousSegment();
+        break;
+    }
   }
 
   Future<void> _initializePlayer() async {
@@ -972,6 +1001,7 @@ class PracticeModeScreenState extends State<PracticeModeScreen> {
   @override
   void dispose() {
     _disposing = true;
+    PlayerRemoteControl.instance.detach(this);
     _ready = false;
     _countdownTimer?.cancel();
     _pollTimer?.cancel();
