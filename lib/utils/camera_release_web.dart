@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:html' as html;
 
 import 'package:camera/camera.dart';
@@ -9,7 +10,13 @@ Future<void> releaseCameraController(CameraController? controller) async {
   if (controller == null) return;
   try {
     if (controller.value.isInitialized && controller.value.isRecordingVideo) {
-      await controller.stopVideoRecording();
+      await controller.stopVideoRecording().timeout(
+        const Duration(milliseconds: 1500),
+        onTimeout: () {
+          debugPrint('[LOOPI] releaseCameraController stopVideoRecording timed out');
+          throw TimeoutException('stopVideoRecording');
+        },
+      );
     }
   } catch (_) {}
   try {
@@ -20,6 +27,10 @@ Future<void> releaseCameraController(CameraController? controller) async {
 
 /// Explicitly stops [MediaStreamTrack]s still attached to preview <video>
 /// elements after Flutter camera dispose (web indicator can otherwise linger).
+///
+/// Also call this *before* [CameraController.stopVideoRecording] on web when
+/// recording may lack a video track — stopping tracks forces MediaRecorder to
+/// finalize instead of hanging for tens of seconds waiting for frames.
 void stopOrphanedCameraMediaTracks() {
   try {
     final nodes = html.document.querySelectorAll('video');
@@ -46,3 +57,6 @@ void stopOrphanedCameraMediaTracks() {
     debugPrint('[LOOPI] stopOrphanedCameraMediaTracks ignored: $error');
   }
 }
+
+/// Stops live getUserMedia tracks immediately so a hung MediaRecorder can finish.
+void forceStopActiveCaptureTracks() => stopOrphanedCameraMediaTracks();

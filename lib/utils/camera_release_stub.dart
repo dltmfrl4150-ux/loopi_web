@@ -15,3 +15,6 @@ Future<void> releaseCameraController(CameraController? controller) async {
 
 /// No-op on non-web platforms.
 void stopOrphanedCameraMediaTracks() {}
+
+/// No-op on non-web platforms.
+void forceStopActiveCaptureTracks() {}

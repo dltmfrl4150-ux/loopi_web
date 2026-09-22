@@ -21,7 +21,6 @@ import '../widgets/favorite_icon_button.dart';
 import '../widgets/category_filter_chips.dart';
 import '../widgets/shell_close_scope.dart';
 import '../widgets/storage_quota_nudge.dart';
-import '../widgets/privacy_notice.dart';
 import 'community_screen.dart';
 import 'link_studio_screen.dart';
 import 'my_profile_screen.dart';
@@ -90,10 +89,6 @@ class _HomeDashboardScreenState extends State<HomeDashboardScreen> {
   void initState() {
     super.initState();
     widget.library.addListener(_onLibraryChanged);
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) return;
-      unawaited(maybeShowPrivacyNoticeDialog(context));
-    });
   }
 
   void _onLibraryChanged() {
@@ -506,8 +501,6 @@ class _HomeTab extends StatelessWidget {
             fontWeight: FontWeight.w800,
           ),
         ),
-        const SizedBox(height: 10),
-        const PrivacyDisclaimerText(fontSize: 11, textAlign: TextAlign.start),
         const SizedBox(height: 20),
         const _AnnouncementBanner(),
         const SizedBox(height: 20),

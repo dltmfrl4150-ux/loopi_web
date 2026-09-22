@@ -6,7 +6,12 @@
     "login_google": "구글로 시작하기",
     "login_apple": "애플로 시작하기",
     "login_guest": "게스트로 둘러보기",
-    "terms_agreement": "계속 진행하면 LOOPI 이용약관 및 개인정보 처리방침에 동의하게 됩니다."
+    "terms_agreement": "계속 진행하면 LOOPI 이용약관 및 개인정보 처리방침에 동의하게 됩니다.",
+    "auth_consent_prefix": "로그인 시 Loopi의 ",
+    "terms_link": "이용약관",
+    "auth_consent_middle": " 및 ",
+    "privacy_link": "개인정보처리방침",
+    "auth_consent_suffix": "에 동의하는 것으로 간주됩니다."
   },
   "home": {
     "greeting": "좋은 하루예요,",
@@ -166,9 +171,9 @@
     "loop": "루프",
     "delay": "준비 시간",
     "save": "저장",
-    "practice_now": "바로 연습하기",
+    "practice_now": "루틴 재생",
     "stop_routine": "연습 중지",
-    "save_routine_button": "루틴 저장하기",
+    "save_routine_button": "루틴 저장",
     "save_dialog_title": "루틴 저장",
     "save_success": "루틴이 저장되었습니다.",
     "player_placeholder": "YouTube Player Placeholder",
@@ -231,12 +236,11 @@
     "storage_quota_nudge": "저장 공간이 꽉 찼어요! 내 댄스 보관함에서 예전 연습 기록을 조금 정리해 볼까요?"
   },
   "privacy": {
-    "title": "개인정보 안내",
-    "acknowledge": "확인했습니다",
-    "login_checkbox": "댄스 연습 녹화는 기기 내부에서만 처리되며 외부 서버로 전송되지 않음에 동의합니다.",
-    "recording_disclaimer": "본 서비스는 사용자의 댄스 연습 녹화 영상을 기기 내부에서만 처리하며, 외부 서버로 절대 수집하거나 전송하지 않습니다.",
-    "settings_title": "녹화 개인정보 정책",
-    "settings_subtitle": "연습 녹화는 이 기기에만 저장·처리됩니다"
+    "title": "개인정보처리방침",
+    "settings_title": "개인정보처리방침",
+    "settings_subtitle": "미디어 저장 및 데이터 처리 안내",
+    "terms_settings_title": "이용약관",
+    "terms_settings_subtitle": "면책 조항 및 서비스 제공 조건"
   },
   "class": {
     "empty": "아직 등록된 클래스가 없습니다.",

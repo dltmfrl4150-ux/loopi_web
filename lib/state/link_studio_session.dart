@@ -137,21 +137,11 @@ class LinkStudioSession extends ChangeNotifier {
 
   void addSegment() {
     final last = _segments.last;
-    final span = (last.endSec - last.startSec).clamp(minGap, _videoDuration);
-    var start = last.endSec;
-    if (start + minGap > _videoDuration) {
-      start = (_videoDuration - span).clamp(0.0, _videoDuration);
-    }
-    var end = (start + span).clamp(0.0, _videoDuration);
-    if (end - start < minGap) {
-      end = _videoDuration;
-      start = (end - minGap).clamp(0.0, _videoDuration);
-    }
     _segments.add(
       RoutineSegment(
         id: 'seg_${_idSeed++}',
-        startSec: start,
-        endSec: end,
+        startSec: last.startSec,
+        endSec: last.endSec,
         speed: last.speed,
         loopCount: last.loopCount,
         delaySec: last.delaySec,

@@ -6,7 +6,12 @@
     "login_google": "Continue with Google",
     "login_apple": "Continue with Apple",
     "login_guest": "Continue as Guest",
-    "terms_agreement": "By continuing, you agree to LOOPI Terms of Service and Privacy Policy."
+    "terms_agreement": "By continuing, you agree to LOOPI Terms of Service and Privacy Policy.",
+    "auth_consent_prefix": "By signing in, you agree to Loopi's ",
+    "terms_link": "Terms of Service",
+    "auth_consent_middle": " and ",
+    "privacy_link": "Privacy Policy",
+    "auth_consent_suffix": "."
   },
   "home": {
     "greeting": "Good day,",
@@ -166,7 +171,7 @@
     "loop": "Loop",
     "delay": "Prep time",
     "save": "Save",
-    "practice_now": "Practice Now",
+    "practice_now": "Play Routine",
     "stop_routine": "Stop Routine",
     "save_routine_button": "Save Routine",
     "save_dialog_title": "Save Routine",
@@ -231,12 +236,11 @@
     "storage_quota_nudge": "Storage is full! Want to clear older practice takes in My Dance Library?"
   },
   "privacy": {
-    "title": "Privacy notice",
-    "acknowledge": "Got it",
-    "login_checkbox": "I agree that dance practice recordings are processed only on this device and are not sent to external servers.",
-    "recording_disclaimer": "This service processes your recorded dance practice videos only on your local device and never collects or transmits them to external servers.",
-    "settings_title": "Recording privacy",
-    "settings_subtitle": "Practice recordings stay and are processed on this device only"
+    "title": "Privacy Policy",
+    "settings_title": "Privacy Policy",
+    "settings_subtitle": "Media storage and data handling",
+    "terms_settings_title": "Terms of Service",
+    "terms_settings_subtitle": "Disclaimer and service conditions"
   },
   "class": {
     "empty": "No classes yet.",

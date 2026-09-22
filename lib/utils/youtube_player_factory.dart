@@ -9,6 +9,18 @@ import 'youtube_id.dart';
 
 bool _youtubeInteropGuardInstalled = false;
 
+bool isYoutubeInteropError(Object error) {
+  final msg = error.toString();
+  return msg.contains('youtube_player_iframe') ||
+      msg.contains('video_information') ||
+      msg.contains("type 'int' is not a subtype of type 'Map<String, dynamic>'") ||
+      msg.contains("type 'double' is not a subtype of type 'Map<String, dynamic>'") ||
+      msg.contains('Map<String, dynamic>') ||
+      msg.contains(r'map[$_get]') ||
+      (msg.contains('TypeError') &&
+          (msg.contains('is not a function') || msg.contains('Map')));
+}
+
 /// Marks known youtube_player_iframe JS-interop TypeErrors as handled so they
 /// cannot kill Dart microtasks (engine poll / stopRecording Completers).
 void installYoutubeInteropErrorGuard() {
@@ -16,12 +28,7 @@ void installYoutubeInteropErrorGuard() {
   _youtubeInteropGuardInstalled = true;
   final previous = PlatformDispatcher.instance.onError;
   PlatformDispatcher.instance.onError = (Object error, StackTrace stack) {
-    final msg = error.toString();
-    final isYtInterop = msg.contains('youtube_player_iframe') ||
-        msg.contains("type 'int' is not a subtype of type 'Map<String, dynamic>'") ||
-        msg.contains("type 'double' is not a subtype of type 'Map<String, dynamic>'") ||
-        (msg.contains('TypeError') && msg.contains('Map<String, dynamic>'));
-    if (isYtInterop) {
+    if (isYoutubeInteropError(error)) {
       debugPrint('Ignored YouTube interop error to keep listener alive: $error');
       return true;
     }
@@ -129,6 +136,10 @@ Future<T?> safeYoutubePlayerCall<T>(
   try {
     return await action();
   } catch (error, stack) {
+    if (isYoutubeInteropError(error)) {
+      debugPrint('Ignored YouTube interop error to keep listener alive: $error');
+      return null;
+    }
     debugPrint('Ignored YouTube interop error to keep listener alive: $error');
     assert(() {
       debugPrint('$stack');

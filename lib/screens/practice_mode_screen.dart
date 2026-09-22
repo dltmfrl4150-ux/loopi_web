@@ -415,13 +415,6 @@ class PracticeModeScreenState extends State<PracticeModeScreen>
     try {
       switch (_currentRoutine.sourceType) {
         case SourceType.youtube:
-          try {
-            final meta = _youtubePlayer.metadata.duration.inMilliseconds / 1000.0;
-            if (meta > 1) {
-              _cachedMediaDurationSec = meta;
-              return meta;
-            }
-          } catch (_) {}
           final d = await _yt(() => _youtubePlayer.duration)
               .timeout(const Duration(milliseconds: 800), onTimeout: () => null);
           if (d != null && d > 1) {

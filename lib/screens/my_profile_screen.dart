@@ -452,29 +452,19 @@ class _MyProfileScreenState extends State<MyProfileScreen> {
                     ),
                     const Divider(height: 1),
                     ListTile(
+                      leading: const Icon(Icons.description_outlined, color: LoopiColors.purple),
+                      title: Text('privacy.terms_settings_title'.tr()),
+                      subtitle: Text('privacy.terms_settings_subtitle'.tr()),
+                      trailing: const Icon(Icons.chevron_right),
+                      onTap: () => showTermsOfServiceDialog(context),
+                    ),
+                    const Divider(height: 1),
+                    ListTile(
                       leading: const Icon(Icons.privacy_tip_outlined, color: LoopiColors.purple),
                       title: Text('privacy.settings_title'.tr()),
                       subtitle: Text('privacy.settings_subtitle'.tr()),
-                      onTap: () {
-                        showDialog<void>(
-                          context: context,
-                          builder: (dialogContext) => AlertDialog(
-                            title: Text('privacy.title'.tr()),
-                            content: const SingleChildScrollView(
-                              child: PrivacyDisclaimerText(
-                                textAlign: TextAlign.start,
-                                fontSize: 14,
-                              ),
-                            ),
-                            actions: [
-                              TextButton(
-                                onPressed: () => Navigator.pop(dialogContext),
-                                child: Text('common.close'.tr()),
-                              ),
-                            ],
-                          ),
-                        );
-                      },
+                      trailing: const Icon(Icons.chevron_right),
+                      onTap: () => showPrivacyPolicyDialog(context),
                     ),
                   ],
                 ),

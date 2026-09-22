@@ -1,97 +1,151 @@
 import 'package:easy_localization/easy_localization.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 
+import '../constants/legal_texts.dart';
 import '../theme/loopi_colors.dart';
-import '../utils/privacy_prefs.dart';
 
-String privacyRecordingDisclaimer([BuildContext? context]) {
-  final code = context == null
-      ? 'ko'
-      : EasyLocalization.of(context)?.locale.languageCode ?? 'ko';
-  return code == 'en'
-      ? kPrivacyRecordingDisclaimerEn
-      : kPrivacyRecordingDisclaimerKo;
-}
-
-/// First-launch (or until acknowledged) privacy dialog.
-Future<void> maybeShowPrivacyNoticeDialog(BuildContext context) async {
-  final done = await isPrivacyAcknowledged();
-  if (done || !context.mounted) return;
-  await showDialog<void>(
+Future<void> showTermsOfServiceDialog(BuildContext context) {
+  final lang = context.locale.languageCode;
+  return _showScrollableLegalDialog(
     context: context,
-    barrierDismissible: false,
-    builder: (dialogContext) {
-      return AlertDialog(
-        title: Text('privacy.title'.tr()),
-        content: SingleChildScrollView(
-          child: Text(privacyRecordingDisclaimer(dialogContext)),
-        ),
-        actions: [
-          FilledButton(
-            onPressed: () async {
-              await setPrivacyAcknowledged();
-              if (dialogContext.mounted) Navigator.pop(dialogContext);
-            },
-            child: Text('privacy.acknowledge'.tr()),
-          ),
-        ],
-      );
-    },
+    title: LegalTexts.termsTitle(lang),
+    body: LegalTexts.termsOfServiceBody(lang),
   );
 }
 
-/// Compact footer / settings copy for the recording privacy policy.
-class PrivacyDisclaimerText extends StatelessWidget {
-  const PrivacyDisclaimerText({
-    super.key,
-    this.textAlign = TextAlign.center,
-    this.fontSize = 11,
-  });
+Future<void> showPrivacyPolicyDialog(BuildContext context) {
+  final lang = context.locale.languageCode;
+  return _showScrollableLegalDialog(
+    context: context,
+    title: LegalTexts.privacyTitle(lang),
+    body: LegalTexts.privacyPolicyBody(lang),
+  );
+}
 
-  final TextAlign textAlign;
-  final double fontSize;
+Future<void> _showScrollableLegalDialog({
+  required BuildContext context,
+  required String title,
+  required String body,
+}) {
+  final maxHeight = MediaQuery.sizeOf(context).height * 0.72;
+  return showDialog<void>(
+    context: context,
+    builder: (dialogContext) => AlertDialog(
+      title: Text(title),
+      content: SizedBox(
+        width: double.maxFinite,
+        child: ConstrainedBox(
+          constraints: BoxConstraints(maxHeight: maxHeight),
+          child: _LegalTextScrollBody(body: body),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(dialogContext),
+          child: Text('common.close'.tr()),
+        ),
+      ],
+    ),
+  );
+}
+
+/// Owns a shared [ScrollController] so [Scrollbar] and [SingleChildScrollView]
+/// stay in sync (avoids Web "no ScrollPosition attached" assertions).
+class _LegalTextScrollBody extends StatefulWidget {
+  const _LegalTextScrollBody({required this.body});
+
+  final String body;
+
+  @override
+  State<_LegalTextScrollBody> createState() => _LegalTextScrollBodyState();
+}
+
+class _LegalTextScrollBodyState extends State<_LegalTextScrollBody> {
+  late final ScrollController _scrollController;
+
+  @override
+  void initState() {
+    super.initState();
+    _scrollController = ScrollController();
+  }
+
+  @override
+  void dispose() {
+    _scrollController.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
-    return Text(
-      privacyRecordingDisclaimer(context),
-      textAlign: textAlign,
-      style: TextStyle(
-        color: LoopiColors.textMuted(context),
-        fontSize: fontSize,
-        height: 1.35,
+    return Scrollbar(
+      controller: _scrollController,
+      child: SingleChildScrollView(
+        controller: _scrollController,
+        child: SelectableText(
+          widget.body,
+          style: const TextStyle(height: 1.5, fontSize: 13.5),
+        ),
       ),
     );
   }
 }
 
-/// Login checkbox requiring acknowledgment before continuing.
-class PrivacyAgreementCheckbox extends StatelessWidget {
-  const PrivacyAgreementCheckbox({
-    super.key,
-    required this.value,
-    required this.onChanged,
-  });
+/// Muted caption under social login buttons with tappable legal links.
+class LoginAuthLegalCaption extends StatefulWidget {
+  const LoginAuthLegalCaption({super.key});
 
-  final bool value;
-  final ValueChanged<bool?>? onChanged;
+  @override
+  State<LoginAuthLegalCaption> createState() => _LoginAuthLegalCaptionState();
+}
+
+class _LoginAuthLegalCaptionState extends State<LoginAuthLegalCaption> {
+  late final TapGestureRecognizer _termsTap;
+  late final TapGestureRecognizer _privacyTap;
+
+  @override
+  void initState() {
+    super.initState();
+    _termsTap = TapGestureRecognizer()..onTap = _openTerms;
+    _privacyTap = TapGestureRecognizer()..onTap = _openPrivacy;
+  }
+
+  @override
+  void dispose() {
+    _termsTap.dispose();
+    _privacyTap.dispose();
+    super.dispose();
+  }
+
+  void _openTerms() => showTermsOfServiceDialog(context);
+
+  void _openPrivacy() => showPrivacyPolicyDialog(context);
 
   @override
   Widget build(BuildContext context) {
-    return CheckboxListTile(
-      value: value,
-      onChanged: onChanged,
-      controlAffinity: ListTileControlAffinity.leading,
-      contentPadding: EdgeInsets.zero,
-      dense: true,
-      title: Text(
-        'privacy.login_checkbox'.tr(),
-        style: TextStyle(
-          color: LoopiColors.textMuted(context),
-          fontSize: 12,
-          height: 1.35,
-        ),
+    final muted = LoopiColors.textMuted(context);
+    final linkStyle = TextStyle(
+      color: LoopiColors.deepPurple,
+      fontSize: 11,
+      height: 1.4,
+      fontWeight: FontWeight.w600,
+      decoration: TextDecoration.underline,
+      decorationColor: LoopiColors.deepPurple.withValues(alpha: 0.6),
+    );
+    final baseStyle = TextStyle(color: muted, fontSize: 11, height: 1.4);
+
+    return Text.rich(
+      TextSpan(
+        style: baseStyle,
+        children: [
+          TextSpan(text: 'social_login.auth_consent_prefix'.tr()),
+          TextSpan(text: 'social_login.terms_link'.tr(), style: linkStyle, recognizer: _termsTap),
+          TextSpan(text: 'social_login.auth_consent_middle'.tr()),
+          TextSpan(text: 'social_login.privacy_link'.tr(), style: linkStyle, recognizer: _privacyTap),
+          TextSpan(text: 'social_login.auth_consent_suffix'.tr()),
+        ],
       ),
+      textAlign: TextAlign.center,
     );
   }
 }
