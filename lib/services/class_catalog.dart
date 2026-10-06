@@ -33,7 +33,9 @@ class ClassCatalog extends ChangeNotifier {
 
   List<ClassCourse> listAll({String category = RoutineCategory.all}) {
     if (category == RoutineCategory.all) return courses;
-    return _courses.where((c) => c.category == category).toList();
+    return _courses
+        .where((c) => RoutineCategory.matches(c.category, category))
+        .toList();
   }
 
   List<ClassCourse> listForInstructor(
@@ -90,7 +92,7 @@ class ClassCatalog extends ChangeNotifier {
       videoUrl: 'https://www.youtube.com/watch?v=M7lc1UVf-VE',
       videoId: 'M7lc1UVf-VE',
       createdAt: now.subtract(const Duration(days: 3)),
-      category: RoutineCategory.dance,
+      category: RoutineCategory.kpop,
       authorId: 'instructor_loopi',
       authorName: 'LOOPI Coach',
       isMirrored: true,
@@ -116,7 +118,7 @@ class ClassCatalog extends ChangeNotifier {
       videoUrl: 'https://www.youtube.com/watch?v=jNQXAC9IVRw',
       videoId: 'jNQXAC9IVRw',
       createdAt: now.subtract(const Duration(days: 10)),
-      category: RoutineCategory.dance,
+      category: RoutineCategory.hiphop,
       authorId: 'instructor_mira',
       authorName: 'Mira',
       isMirrored: true,
@@ -134,7 +136,7 @@ class ClassCatalog extends ChangeNotifier {
         instructorName: 'LOOPI Coach',
         description: '기초 그루브부터 포인트 구간까지, 강의 영상과 루틴 반복을 한 화면에서 연습하세요.',
         thumbnailUrl: 'https://img.youtube.com/vi/M7lc1UVf-VE/hqdefault.jpg',
-        category: RoutineCategory.dance,
+        category: RoutineCategory.kpop,
         price: 0,
         createdAt: now.subtract(const Duration(days: 2)),
         studentCount: 128,
@@ -148,7 +150,7 @@ class ClassCatalog extends ChangeNotifier {
         instructorName: 'Mira',
         description: '발 움직임과 무게 이동을 천천히 익힌 뒤 원속으로 연결합니다.',
         thumbnailUrl: 'https://img.youtube.com/vi/jNQXAC9IVRw/hqdefault.jpg',
-        category: RoutineCategory.dance,
+        category: RoutineCategory.hiphop,
         price: 9900,
         createdAt: now.subtract(const Duration(days: 8)),
         studentCount: 64,
@@ -171,7 +173,7 @@ class ClassCatalog extends ChangeNotifier {
         instructorName: 'LOOPI Coach',
         description: '짧은 문장을 구간별로 듣고 따라 말하며 리듬을 익히는 어학 클래스입니다.',
         thumbnailUrl: 'https://img.youtube.com/vi/M7lc1UVf-VE/mqdefault.jpg',
-        category: RoutineCategory.language,
+        category: RoutineCategory.other,
         price: 0,
         createdAt: now.subtract(const Duration(days: 1)),
         studentCount: 42,
@@ -188,7 +190,7 @@ class ClassCatalog extends ChangeNotifier {
               videoUrl: 'https://www.youtube.com/watch?v=M7lc1UVf-VE',
               videoId: 'M7lc1UVf-VE',
               createdAt: now,
-              category: RoutineCategory.language,
+              category: RoutineCategory.other,
               authorId: 'instructor_loopi',
               authorName: 'LOOPI Coach',
               segments: const [

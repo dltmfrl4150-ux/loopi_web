@@ -297,6 +297,16 @@ class RoutineLibrary extends ChangeNotifier {
     await _persist();
   }
 
+  /// Clears all saved takes for [routineId] so a new Record session starts clean
+  /// (Comparison must not inherit prior A/B/C section chips).
+  Future<void> clearPracticeResultsForRoutine(String routineId) async {
+    final before = _practiceResults.length;
+    _practiceResults.removeWhere((result) => result.routineId == routineId);
+    if (_practiceResults.length == before) return;
+    notifyListeners();
+    await _persistLocal();
+  }
+
   Future<void> deleteManyPracticeResults(Iterable<String> ids) async {
     final idSet = ids.toSet();
     if (idSet.isEmpty) return;

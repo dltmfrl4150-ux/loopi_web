@@ -41,9 +41,13 @@
   "category": {
     "label": "카테고리",
     "all": "전체",
-    "dance": "댄스",
-    "language": "어학",
-    "other": "기타"
+    "kpop": "K-pop",
+    "choreo": "코레오",
+    "hiphop": "힙합",
+    "zumba": "줌바",
+    "other": "기타",
+    "dance": "K-pop",
+    "language": "기타"
   },
   "library": {
     "title": "내 댄스 보관함",

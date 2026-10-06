@@ -19,7 +19,7 @@ class SaveRoutineDialogResult {
   const SaveRoutineDialogResult({
     required this.name,
     this.overwrite = false,
-    this.category = RoutineCategory.dance,
+    this.category = RoutineCategory.kpop,
   });
 
   final String name;
@@ -129,17 +129,24 @@ class _SaveRoutineDialogState extends State<SaveRoutineDialog> {
 
   @override
   Widget build(BuildContext context) {
+    final dark = LoopiColors.isDark(context);
+    final titleColor = dark ? Colors.white : LoopiColors.ink;
+    final mutedColor = dark ? Colors.white70 : LoopiColors.muted;
+    final labelColor = dark ? Colors.white.withValues(alpha: 0.9) : LoopiColors.ink;
+    final fieldFill = dark ? Colors.white12 : LoopiColors.canvas;
+    final fieldBorder = dark ? Colors.white24 : LoopiColors.line;
+
     return StatefulBuilder(
       builder: (context, setDialogState) {
         return AlertDialog(
-          backgroundColor: Colors.white,
+          backgroundColor: dark ? LoopiColors.darkSurface : Colors.white,
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
           title: Text(
             widget.allowOverwrite ? 'studio.save_dialog_title'.tr() : 'studio.save_dialog_title'.tr(),
-            style: const TextStyle(
+            style: TextStyle(
               fontSize: 20,
               fontWeight: FontWeight.w700,
-              color: LoopiColors.ink,
+              color: titleColor,
             ),
           ),
           content: ConstrainedBox(
@@ -152,7 +159,7 @@ class _SaveRoutineDialogState extends State<SaveRoutineDialog> {
                   widget.allowOverwrite
                       ? 'studio.save_overwrite_hint'.tr()
                       : 'studio.save_name_hint'.tr(),
-                  style: const TextStyle(color: LoopiColors.muted, fontSize: 13),
+                  style: TextStyle(color: mutedColor, fontSize: 13),
                 ),
                 const SizedBox(height: 18),
                 TextField(
@@ -163,16 +170,23 @@ class _SaveRoutineDialogState extends State<SaveRoutineDialog> {
                   keyboardType: TextInputType.text,
                   textInputAction: TextInputAction.done,
                   inputFormatters: [LengthLimitingTextInputFormatter(80)],
+                  style: TextStyle(color: titleColor),
                   onChanged: (value) => setDialogState(() {}),
                   onSubmitted: (_) => _submit(overwrite: false),
                   decoration: InputDecoration(
                     labelText: 'Routine name',
+                    labelStyle: TextStyle(color: mutedColor),
                     hintText: _suggestedName,
+                    hintStyle: TextStyle(color: mutedColor),
                     filled: true,
-                    fillColor: LoopiColors.canvas,
+                    fillColor: fieldFill,
                     border: OutlineInputBorder(
                       borderRadius: BorderRadius.circular(12),
-                      borderSide: const BorderSide(color: LoopiColors.line),
+                      borderSide: BorderSide(color: fieldBorder),
+                    ),
+                    enabledBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: BorderSide(color: fieldBorder),
                     ),
                     focusedBorder: OutlineInputBorder(
                       borderRadius: BorderRadius.circular(12),
@@ -183,8 +197,8 @@ class _SaveRoutineDialogState extends State<SaveRoutineDialog> {
                 const SizedBox(height: 18),
                 Text(
                   'category.label'.tr(),
-                  style: const TextStyle(
-                    color: LoopiColors.ink,
+                  style: TextStyle(
+                    color: labelColor,
                     fontWeight: FontWeight.w700,
                     fontSize: 13,
                   ),
@@ -201,9 +215,9 @@ class _SaveRoutineDialogState extends State<SaveRoutineDialog> {
             OutlinedButton(
               onPressed: _close,
               style: OutlinedButton.styleFrom(
-                foregroundColor: LoopiColors.ink,
+                foregroundColor: titleColor,
                 padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
-                side: const BorderSide(color: LoopiColors.line),
+                side: BorderSide(color: fieldBorder),
                 shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(12),
                 ),

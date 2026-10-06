@@ -273,7 +273,7 @@ class LinkStudioSession extends ChangeNotifier {
     bool isFavorite = false,
     String authorId = 'me',
     String authorName = '나',
-    String category = RoutineCategory.dance,
+    String category = RoutineCategory.kpop,
     bool isMirrored = false,
   }) {
     return SavedRoutine(

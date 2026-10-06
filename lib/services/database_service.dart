@@ -328,6 +328,9 @@ class DatabaseService {
   ) {
     final value = RoutineCategory.queryValue(category);
     if (value == null) return query;
+    // dance→kpop and language→other still exist in older documents; filter those
+    // client-side via RoutineCategory.matches after the fetch.
+    if (RoutineCategory.hasLegacyAliases(value)) return query;
     return query.where('category', isEqualTo: value);
   }
 

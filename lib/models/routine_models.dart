@@ -119,7 +119,7 @@ class SavedRoutine {
     this.isFavorite = false,
     this.authorId = 'me',
     this.authorName = '나',
-    this.category = RoutineCategory.dance,
+    this.category = RoutineCategory.kpop,
     this.isMirrored = false,
   });
 
@@ -235,6 +235,8 @@ class SavedRoutine {
     String? authorName,
     String? category,
     bool? isMirrored,
+    List<int>? localDataBytes,
+    bool clearLocalDataBytes = false,
   }) {
     return SavedRoutine(
       id: id,
@@ -246,7 +248,7 @@ class SavedRoutine {
       sourceType: sourceType,
       localFilePath: localFilePath,
       fileName: fileName,
-      localDataBytes: localDataBytes,
+      localDataBytes: clearLocalDataBytes ? null : (localDataBytes ?? this.localDataBytes),
       isFavorite: isFavorite ?? this.isFavorite,
       authorId: authorId ?? this.authorId,
       authorName: authorName ?? this.authorName,
@@ -310,10 +312,12 @@ class PracticeResult {
     this.startTime = 0,
     this.endTime = 0,
     this.playbackRate = 1.0,
-    this.category = RoutineCategory.dance,
+    this.category = RoutineCategory.kpop,
     this.intervalMarkers = const [],
     this.isAudioRecording = false,
     this.recordedSectionIndex,
+    this.recordedAspectRatio,
+    this.sourceRoutine,
   });
 
   final String id;
@@ -330,6 +334,11 @@ class PracticeResult {
   final bool isAudioRecording;
   /// Which routine section this take belongs to (single-section practice).
   final int? recordedSectionIndex;
+  /// Preview crop ratio used while recording (e.g. 9/16) so playback matches.
+  final double? recordedAspectRatio;
+  /// Snapshot of the practiced routine (community / unsaved) so Comparison
+  /// can reopen without a private library document.
+  final SavedRoutine? sourceRoutine;
 
   factory PracticeResult.fromJson(Map<String, dynamic> json) {
     final rawMarkers = json['intervalMarkers'];
@@ -387,6 +396,18 @@ class PracticeResult {
           : const [],
       isAudioRecording: json['isAudioRecording'] == true || _pathLooksLikeAudio(json['recordedPath'] as String?),
       recordedSectionIndex: sectionIndex,
+      recordedAspectRatio: (json['recordedAspectRatio'] as num?)?.toDouble(),
+      sourceRoutine: () {
+        final snap = json['routineSnapshot'] ?? json['sourceRoutine'];
+        if (snap is Map) {
+          try {
+            return SavedRoutine.fromJson(Map<String, dynamic>.from(snap));
+          } catch (_) {
+            return null;
+          }
+        }
+        return null;
+      }(),
     );
   }
 
@@ -407,6 +428,13 @@ class PracticeResult {
         'intervalMarkers': intervalMarkers.map((marker) => marker.toJson()).toList(),
         'isAudioRecording': isAudioRecording,
         'recordedSectionIndex': recordedSectionIndex,
+        'recordedAspectRatio': recordedAspectRatio,
+        if (sourceRoutine != null)
+          'routineSnapshot': () {
+            final snap = sourceRoutine!.toJson();
+            snap.remove('localDataBytes');
+            return snap;
+          }(),
       };
 
   Map<String, dynamic> toFirestoreJson() {

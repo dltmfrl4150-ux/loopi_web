@@ -8,6 +8,7 @@ import 'package:youtube_player_iframe/youtube_player_iframe.dart';
 import 'package:easy_localization/easy_localization.dart';
 import 'package:video_player/video_player.dart';
 import 'package:audioplayers/audioplayers.dart' hide PlayerState;
+import 'package:pointer_interceptor/pointer_interceptor.dart';
 
 import '../models/routine_models.dart';
 import '../services/player_remote_control.dart';
@@ -137,7 +138,7 @@ class PracticeModeScreenState extends State<PracticeModeScreen>
     });
   }
 
-  /// Wear / remote channel entry — maps onto existing private controls only.
+  /// Wear / remote channel entry Ã¢â¬â maps onto existing private controls only.
   @override
   Future<void> handleRemoteCommand(PlayerRemoteCommand command) async {
     if (!mounted || _disposing) return;
@@ -173,7 +174,7 @@ class PracticeModeScreenState extends State<PracticeModeScreen>
             videoUrl: _currentRoutine.videoUrl,
           );
           if (videoId == null || videoId.isEmpty) {
-            throw StateError('YouTube 영상 ID가 없습니다.');
+            throw StateError('YouTube Ã¬ËÂÃ¬ÆÂ IDÃªÂ°â¬ Ã¬ââ Ã¬Å ÂµÃ«â¹ËÃ«â¹Â¤.');
           }
           _youtubePlayer = createLoopiYoutubeController(
             videoId: videoId,
@@ -190,7 +191,7 @@ class PracticeModeScreenState extends State<PracticeModeScreen>
               if (_isPlaying != playing) {
                 setState(() => _isPlaying = playing);
               }
-              // Cue endSeconds / EOF pause — advance while we were playing.
+              // Cue endSeconds / EOF pause Ã¢â¬â advance while we were playing.
               if (wasPlaying &&
                   (value.playerState == PlayerState.ended ||
                       value.playerState == PlayerState.paused ||
@@ -200,8 +201,8 @@ class PracticeModeScreenState extends State<PracticeModeScreen>
             },
             isAlive: () => _youtubeAlive,
           );
-          // Do NOT subscribe to videoStateStream — float time payloads crash
-          // the package (double→Map TypeError). Boundary uses Timer poll only.
+          // Do NOT subscribe to videoStateStream Ã¢â¬â float time payloads crash
+          // the package (doubleÃ¢â âMap TypeError). Boundary uses Timer poll only.
           break;
         case SourceType.localVideo:
           if (_currentRoutine.localFilePath != null && !kIsWeb) {
@@ -312,7 +313,7 @@ class PracticeModeScreenState extends State<PracticeModeScreen>
             videoUrl: _currentRoutine.videoUrl,
           );
           if (videoId == null) {
-            throw StateError('YouTube 영상 ID가 없습니다.');
+            throw StateError('YouTube Ã¬ËÂÃ¬ÆÂ IDÃªÂ°â¬ Ã¬ââ Ã¬Å ÂµÃ«â¹ËÃ«â¹Â¤.');
           }
           await _yt(() => _youtubePlayer.loadVideoById(videoId: videoId));
           if (!_youtubeAlive) return;
@@ -514,7 +515,7 @@ class PracticeModeScreenState extends State<PracticeModeScreen>
               allowSeekAhead: true,
             ),
           );
-          // Cue/seek can auto-resume on web — force hold on start frame.
+          // Cue/seek can auto-resume on web Ã¢â¬â force hold on start frame.
           await _yt(() => _youtubePlayer.pauseVideo());
           break;
         case SourceType.localVideo:
@@ -535,7 +536,7 @@ class PracticeModeScreenState extends State<PracticeModeScreen>
           break;
       }
 
-      // 2) Honor Section delayTime before play (0 → short settle only).
+      // 2) Honor Section delayTime before play (0 Ã¢â â short settle only).
       if (delaySec > 0) {
         debugPrint(
           '[LOOPI] playback delay ${delaySec}s before '
@@ -726,7 +727,7 @@ class PracticeModeScreenState extends State<PracticeModeScreen>
     await _startRoutine(next, immediate: true);
   }
 
-  // Single-section playback: at effectiveEnd, pause — never auto-advance A→B.
+  // Single-section playback: at effectiveEnd, pause Ã¢â¬â never auto-advance AÃ¢â âB.
   void _onTime(double time, {double? videoDuration}) {
     if (!_ready || _delayPending || _isSeeking || _isAdvancing || _segmentFinished) {
       return;
@@ -780,7 +781,7 @@ class PracticeModeScreenState extends State<PracticeModeScreen>
       await pausePlayback();
       debugPrint(
         '[LOOPI] single-section playback complete '
-        '${sectionLabelForIndex(_segmentIndex)} — paused',
+        '${sectionLabelForIndex(_segmentIndex)} Ã¢â¬â paused',
       );
     } finally {
       _isAdvancing = false;
@@ -904,7 +905,7 @@ class PracticeModeScreenState extends State<PracticeModeScreen>
           _audioPlayer?.pause();
           break;
       }
-      // ✨ 실질적으로 딜레이 초만큼 대기하는 코드가 빠져 있었습니다!
+      // Ã¢ÅÂ¨ Ã¬â¹Â¤Ã¬Â§ËÃ¬Â ÂÃ¬ÅÂ¼Ã«Â¡Å Ã«âÅÃ«Â ËÃ¬ÂÂ´ Ã¬Â´ËÃ«Â§ÅÃ­ÂÂ¼ Ã«Åâ¬ÃªÂ¸Â°Ã­â¢ËÃ«Å â Ã¬Â½âÃ«âÅÃªÂ°â¬ Ã«Â¹Â Ã¬Â Â¸ Ã¬Å¾ËÃ¬âËÃ¬Å ÂµÃ«â¹ËÃ«â¹Â¤!
       await Future.delayed(Duration(seconds: delaySec));
       if (!_youtubeAlive && _currentRoutine.sourceType == SourceType.youtube) {
         return;
@@ -915,7 +916,102 @@ class PracticeModeScreenState extends State<PracticeModeScreen>
     }
   }
 
-  Widget _playerControls() {
+  Widget _playerControls({bool compact = false}) {
+    final iconSize = compact ? 22.0 : 24.0;
+    final pad = compact ? 6.0 : 16.0;
+    final playButton = Container(
+      decoration: const BoxDecoration(
+        color: LoopiColors.purple,
+        shape: BoxShape.circle,
+      ),
+      child: IconButton(
+        onPressed: _togglePlayPause,
+        iconSize: compact ? 22 : 24,
+        padding: EdgeInsets.all(compact ? 8 : 12),
+        constraints: compact
+            ? const BoxConstraints(minWidth: 40, minHeight: 40)
+            : const BoxConstraints(minWidth: 48, minHeight: 48),
+        icon: Icon(_isPlaying ? Icons.pause : Icons.play_arrow),
+        tooltip: _isPlaying ? 'player.pause'.tr() : 'player.play'.tr(),
+        color: Colors.white,
+      ),
+    );
+
+    if (compact) {
+      // Vertical rail for landscape / low-height side panel.
+      return Padding(
+        padding: EdgeInsets.fromLTRB(pad, 4, pad, pad),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (_isGroupPlayback)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 4),
+                child: Text(
+                  '${_playlistIndex + 1}/${_playlist.length}',
+                  style: const TextStyle(
+                    color: Colors.white70,
+                    fontWeight: FontWeight.w600,
+                    fontSize: 11,
+                  ),
+                ),
+              ),
+            if (_isGroupPlayback)
+              IconButton(
+                onPressed: _previousRoutine,
+                iconSize: iconSize,
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+                icon: const Icon(Icons.skip_previous_rounded),
+                color: Colors.white,
+              ),
+            IconButton(
+              onPressed: _skipToPreviousSegment,
+              iconSize: iconSize,
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+              icon: const Icon(Icons.keyboard_double_arrow_left_rounded),
+              color: Colors.white,
+            ),
+            IconButton(
+              onPressed: () => _seekRelative(-5),
+              iconSize: iconSize,
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+              icon: const Icon(Icons.replay_5),
+              color: Colors.white,
+            ),
+            playButton,
+            IconButton(
+              onPressed: () => _seekRelative(5),
+              iconSize: iconSize,
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+              icon: const Icon(Icons.forward_5),
+              color: Colors.white,
+            ),
+            IconButton(
+              onPressed: _skipToNextSegment,
+              iconSize: iconSize,
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+              icon: const Icon(Icons.keyboard_double_arrow_right_rounded),
+              color: Colors.white,
+            ),
+            if (_isGroupPlayback)
+              IconButton(
+                onPressed: _nextRoutine,
+                iconSize: iconSize,
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+                icon: const Icon(Icons.skip_next_rounded),
+                color: Colors.white,
+              ),
+          ],
+        ),
+      );
+    }
+
     return Container(
       padding: const EdgeInsets.all(16),
       child: Column(
@@ -925,7 +1021,7 @@ class PracticeModeScreenState extends State<PracticeModeScreen>
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
                 Text(
-                  '${_playlistIndex + 1} / ${_playlist.length}  •  ${_currentRoutine.name}',
+                  '${_playlistIndex + 1} / ${_playlist.length}  ·  ${_currentRoutine.name}',
                   style: const TextStyle(color: Colors.white70, fontWeight: FontWeight.w600),
                 ),
               ],
@@ -938,13 +1034,11 @@ class PracticeModeScreenState extends State<PracticeModeScreen>
                 IconButton(
                   onPressed: _previousRoutine,
                   icon: const Icon(Icons.skip_previous_rounded),
-                  tooltip: '이전 루틴',
                   color: Colors.white,
                 ),
               IconButton(
                 onPressed: _skipToPreviousSegment,
                 icon: const Icon(Icons.keyboard_double_arrow_left_rounded),
-                tooltip: '이전 구간',
                 color: Colors.white,
               ),
               IconButton(
@@ -953,18 +1047,7 @@ class PracticeModeScreenState extends State<PracticeModeScreen>
                 tooltip: 'player.rewind_5s'.tr(),
                 color: Colors.white,
               ),
-              Container(
-                decoration: BoxDecoration(
-                  color: LoopiColors.purple,
-                  shape: BoxShape.circle,
-                ),
-                child: IconButton(
-                  onPressed: _togglePlayPause,
-                  icon: Icon(_isPlaying ? Icons.pause : Icons.play_arrow),
-                  tooltip: _isPlaying ? 'player.pause'.tr() : 'player.play'.tr(),
-                  color: Colors.white,
-                ),
-              ),
+              playButton,
               IconButton(
                 onPressed: () => _seekRelative(5),
                 icon: const Icon(Icons.forward_5),
@@ -974,14 +1057,12 @@ class PracticeModeScreenState extends State<PracticeModeScreen>
               IconButton(
                 onPressed: _skipToNextSegment,
                 icon: const Icon(Icons.keyboard_double_arrow_right_rounded),
-                tooltip: '다음 구간',
                 color: Colors.white,
               ),
               if (_isGroupPlayback)
                 IconButton(
                   onPressed: _nextRoutine,
                   icon: const Icon(Icons.skip_next_rounded),
-                  tooltip: '다음 루틴',
                   color: Colors.white,
                 ),
             ],
@@ -1045,35 +1126,58 @@ class PracticeModeScreenState extends State<PracticeModeScreen>
     );
   }
 
-  Widget _intervalButtons() {
+  Widget _intervalButtons({bool compact = false, bool vertical = false}) {
     final count = _currentRoutine.segments.length;
     if (count == 0) return const SizedBox.shrink();
 
     return LayoutBuilder(
       builder: (context, box) {
-        final maxD = box.maxHeight.clamp(0.0, 96.0);
-        if (!maxD.isFinite || maxD <= 0 || box.maxWidth <= 0) {
+        final maxAlong = vertical
+            ? box.maxWidth.clamp(0.0, compact ? 40.0 : 96.0)
+            : box.maxHeight.clamp(0.0, compact ? 40.0 : 96.0);
+        if (!maxAlong.isFinite || maxAlong <= 0) {
           return const SizedBox.shrink();
         }
-        var diameter = maxD;
+        if (vertical && box.maxHeight <= 0) return const SizedBox.shrink();
+        if (!vertical && box.maxWidth <= 0) return const SizedBox.shrink();
+
+        var diameter = maxAlong;
         if (count > 1) {
-          final fit = box.maxWidth / (1.5 * count - 0.5);
+          final available = vertical ? box.maxHeight : box.maxWidth;
+          final fit = available / (1.35 * count - 0.35);
           if (fit < diameter) diameter = fit;
-        } else if (diameter > box.maxWidth) {
-          diameter = box.maxWidth;
         }
-        diameter = diameter.clamp(24.0, maxD);
-        final gap = count <= 1 ? 0.0 : diameter * 0.5;
+        diameter = diameter.clamp(compact ? 22.0 : 24.0, maxAlong);
+        final gap = count <= 1 ? 0.0 : diameter * (compact ? 0.28 : 0.5);
+
         final buttons = <Widget>[
           for (var index = 0; index < count; index++) ...[
-            if (index > 0) SizedBox(width: gap),
+            if (index > 0) SizedBox(width: vertical ? 0 : gap, height: vertical ? gap : 0),
             SizedBox(
               width: diameter,
               height: diameter,
-              child: _sectionCircleButton(index),
+              child: _sectionCircleButton(index, compact: compact),
             ),
           ],
         ];
+
+        if (vertical) {
+          final col = Column(
+            mainAxisSize: MainAxisSize.min,
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: buttons,
+          );
+          final totalH = count * diameter + (count - 1) * gap;
+          if (totalH <= box.maxHeight) {
+            return Center(child: col);
+          }
+          return Center(
+            child: SingleChildScrollView(
+              child: col,
+            ),
+          );
+        }
+
         final row = Row(
           mainAxisSize: MainAxisSize.min,
           mainAxisAlignment: MainAxisAlignment.center,
@@ -1093,17 +1197,17 @@ class PracticeModeScreenState extends State<PracticeModeScreen>
     );
   }
 
-  Widget _sectionCircleButton(int index) {
+  Widget _sectionCircleButton(int index, {bool compact = false}) {
     final highlight = _currentRoutine.segments[index].isHighlight;
     return Material(
       color: index == _segmentIndex ? LoopiColors.purple : const Color(0xFF2A2438),
       shape: CircleBorder(
         side: highlight
-            ? const BorderSide(color: kHighlightGold, width: 2.4)
+            ? BorderSide(color: kHighlightGold, width: compact ? 1.6 : 2.4)
             : BorderSide.none,
       ),
       shadowColor: highlight ? kHighlightGold : Colors.transparent,
-      elevation: highlight ? 5 : 0,
+      elevation: highlight ? (compact ? 2 : 5) : 0,
       child: InkWell(
         customBorder: const CircleBorder(),
         onTap: () => _jumpToSegment(index),
@@ -1114,22 +1218,23 @@ class PracticeModeScreenState extends State<PracticeModeScreen>
               child: FittedBox(
                 fit: BoxFit.scaleDown,
                 child: Padding(
-                  padding: const EdgeInsets.all(6),
+                  padding: EdgeInsets.all(compact ? 3 : 6),
                   child: Text(
                     sectionLabelForIndex(index),
-                    style: const TextStyle(
+                    style: TextStyle(
                       color: Colors.white,
                       fontWeight: FontWeight.w700,
+                      fontSize: compact ? 12 : 14,
                     ),
                   ),
                 ),
               ),
             ),
             if (highlight)
-              const Positioned(
-                top: 2,
-                right: 2,
-                child: HighlightCrown(size: 11),
+              Positioned(
+                top: compact ? 1 : 2,
+                right: compact ? 1 : 2,
+                child: HighlightCrown(size: compact ? 8 : 11),
               ),
           ],
         ),
@@ -1174,59 +1279,86 @@ class PracticeModeScreenState extends State<PracticeModeScreen>
     );
   }
 
-  Widget _buildMainScaffold({required Widget mediaWidget}) {
-    final content = LayoutBuilder(
+  bool get _isLowHeightViewport {
+    final size = MediaQuery.sizeOf(context);
+    final orientation = MediaQuery.orientationOf(context);
+    return orientation == Orientation.landscape || size.height < 550;
+  }
+
+  Widget _mediaStage(Widget mediaWidget) {
+    return Center(
+      child: AspectRatio(
+        aspectRatio: _playerAspectRatio > 0 ? _playerAspectRatio : 16 / 9,
+        child: Transform.flip(
+          flipX: _currentRoutine.isMirroredOn &&
+              _currentRoutine.sourceType != SourceType.audio,
+          child: mediaWidget,
+        ),
+      ),
+    );
+  }
+
+  Widget _countdownBanner({bool compact = false}) {
+    if (_ready) return const SizedBox.shrink();
+    return Padding(
+      padding: EdgeInsets.fromLTRB(compact ? 8 : 16, compact ? 4 : 8, compact ? 8 : 16, 0),
+      child: Material(
+        color: Colors.black.withValues(alpha: 0.75),
+        borderRadius: BorderRadius.circular(12),
+        child: Padding(
+          padding: EdgeInsets.symmetric(
+            vertical: compact ? 6 : 12,
+            horizontal: compact ? 10 : 16,
+          ),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                'player.get_ready'.tr(),
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: compact ? 12 : 16,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+              SizedBox(width: compact ? 8 : 12),
+              CircleAvatar(
+                radius: compact ? 12 : 18,
+                backgroundColor: LoopiColors.purple,
+                child: Text(
+                  '$_countdown',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: compact ? 12 : 16,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Portrait / desktop: unchanged vertical stack.
+  Widget _buildPortraitPlayerBody(Widget mediaWidget) {
+    return LayoutBuilder(
       builder: (context, constraints) {
         const metadataHeight = 40.0;
         final controlsHeight = _isGroupPlayback ? 120.0 : 88.0;
-        // Previous layout: video capped at 55% and the interval strip Expanded
-        // into the leftover. Keep 40% of that leftover for intervals so the
-        // player can use the rest.
         final previousVideoCap = constraints.maxHeight * 0.55;
-        final previousLeftover = (constraints.maxHeight - previousVideoCap - metadataHeight - controlsHeight)
+        final previousLeftover = (constraints.maxHeight -
+                previousVideoCap -
+                metadataHeight -
+                controlsHeight)
             .clamp(40.0, constraints.maxHeight);
         final intervalHeight = (previousLeftover * 0.4).clamp(40.0, previousLeftover);
 
         return Column(
           children: [
-            // YouTube ToS: countdown must not opaque-cover the iframe logo/controls.
-            if (!_ready)
-              Padding(
-                padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
-                child: Material(
-                  color: Colors.black.withValues(alpha: 0.75),
-                  borderRadius: BorderRadius.circular(12),
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Text(
-                          'player.get_ready'.tr(),
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontSize: 16,
-                            fontWeight: FontWeight.w700,
-                          ),
-                        ),
-                        const SizedBox(width: 12),
-                        CircleAvatar(
-                          radius: 18,
-                          backgroundColor: LoopiColors.purple,
-                          child: Text(
-                            '$_countdown',
-                            style: const TextStyle(
-                              color: Colors.white,
-                              fontSize: 16,
-                              fontWeight: FontWeight.w800,
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ),
+            _countdownBanner(),
             Expanded(
               child: Center(
                 child: ConstrainedBox(
@@ -1253,7 +1385,7 @@ class PracticeModeScreenState extends State<PracticeModeScreen>
                   alignment: Alignment.centerLeft,
                   child: Text(
                     '${sectionLabelForIndex(_segmentIndex)}  '
-                    '${formatMmSs(_segment.startSec)} – ${formatMmSs(_segment.endSec)}  '
+                    '${formatMmSs(_segment.startSec)} - ${formatMmSs(_segment.endSec)}  '
                     '${formatSpeedLabel(_segment.speed)}  ${formatLoopLabel(_segment.loopCount)}  '
                     '${formatDelayLabel(_segment.delaySec)}',
                     maxLines: 1,
@@ -1272,6 +1404,86 @@ class PracticeModeScreenState extends State<PracticeModeScreen>
         );
       },
     );
+  }
+
+  /// Landscape / low-height: video gets max height; compact A-F + transport on the right.
+  Widget _buildLandscapePlayerBody(Widget mediaWidget) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Expanded(
+          flex: 75,
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              Positioned.fill(child: _mediaStage(mediaWidget)),
+              if (!_ready)
+                Align(
+                  alignment: Alignment.topCenter,
+                  child: _countdownBanner(compact: true),
+                ),
+              Positioned(
+                left: 8,
+                right: 8,
+                bottom: 4,
+                child: IgnorePointer(
+                  child: Text(
+                    '${sectionLabelForIndex(_segmentIndex)}  '
+                    '${formatMmSs(_segment.startSec)}-${formatMmSs(_segment.endSec)}  '
+                    '${formatSpeedLabel(_segment.speed)}',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      color: Colors.white.withValues(alpha: 0.72),
+                      fontSize: 11,
+                      shadows: const [
+                        Shadow(blurRadius: 6, color: Colors.black87),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+        PointerInterceptor(
+          child: ColoredBox(
+            color: const Color(0xE6120F1C),
+            child: SizedBox(
+              width: 76,
+              child: LayoutBuilder(
+                builder: (context, rail) {
+                  final transportMax = (rail.maxHeight * 0.48).clamp(96.0, 200.0);
+                  return Column(
+                    children: [
+                      const SizedBox(height: 2),
+                      Expanded(
+                        child: _intervalButtons(compact: true, vertical: true),
+                      ),
+                      ConstrainedBox(
+                        constraints: BoxConstraints(maxHeight: transportMax),
+                        child: SingleChildScrollView(
+                          physics: const ClampingScrollPhysics(),
+                          child: _playerControls(compact: true),
+                        ),
+                      ),
+                    ],
+                  );
+                },
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildMainScaffold({required Widget mediaWidget}) {
+    final isLandscape = _isLowHeightViewport;
+    final content = isLandscape
+        ? _buildLandscapePlayerBody(mediaWidget)
+        : _buildPortraitPlayerBody(mediaWidget);
 
     return Theme(
       data: ThemeData(
@@ -1287,16 +1499,23 @@ class PracticeModeScreenState extends State<PracticeModeScreen>
           : Scaffold(
               backgroundColor: const Color(0xFF120F1C),
               appBar: AppBar(
-                backgroundColor: Colors.transparent,
+                toolbarHeight: isLandscape ? 36 : kToolbarHeight,
+                backgroundColor: isLandscape
+                    ? Colors.black.withValues(alpha: 0.45)
+                    : Colors.transparent,
                 foregroundColor: Colors.white,
+                titleSpacing: isLandscape ? 8 : null,
                 title: Row(
                   children: [
-                    const AppLogo(height: 28),
-                    const SizedBox(width: 12),
+                    if (!isLandscape) ...[
+                      const AppLogo(height: 28),
+                      const SizedBox(width: 12),
+                    ],
                     Expanded(
                       child: Text(
                         _currentRoutine.name,
                         overflow: TextOverflow.ellipsis,
+                        style: TextStyle(fontSize: isLandscape ? 14 : 20),
                       ),
                     ),
                   ],
@@ -1309,7 +1528,13 @@ class PracticeModeScreenState extends State<PracticeModeScreen>
                         await widget.library!.setFavorite(_currentRoutine.id, value);
                         if (!mounted) return;
                         ScaffoldMessenger.of(context).showSnackBar(
-                          SnackBar(content: Text(value ? '즐겨찾기에 추가했습니다.' : '즐겨찾기에서 삭제했습니다.')),
+                          SnackBar(
+                            content: Text(
+                              value
+                                  ? 'common.favorite_added'.tr()
+                                  : 'common.favorite_removed'.tr(),
+                            ),
+                          ),
                         );
                       },
                     ),

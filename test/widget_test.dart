@@ -88,14 +88,22 @@ void main() {
     expect(result, isNotNull);
     expect(result!.name, 'Hip Hop Routine');
     expect(result.overwrite, isFalse);
-    expect(result.category, 'dance');
+    expect(result.category, 'kpop');
   });
 
-  test('Routine category normalize supports other', () {
+  test('Routine category normalize supports genres and legacy aliases', () {
     expect(RoutineCategory.normalize('other'), 'other');
     expect(RoutineCategory.normalize('기타'), 'other');
+    expect(RoutineCategory.normalize('dance'), 'kpop');
+    expect(RoutineCategory.normalize('댄스'), 'kpop');
+    expect(RoutineCategory.normalize('어학'), 'other');
+    expect(RoutineCategory.normalize('language'), 'other');
+    expect(RoutineCategory.normalize('힙합'), 'hiphop');
+    expect(RoutineCategory.normalize('코레오'), 'choreo');
+    expect(RoutineCategory.normalize('줌바'), 'zumba');
     expect(RoutineCategory.queryValue('other'), 'other');
     expect(RoutineCategory.matches('other', 'other'), isTrue);
+    expect(RoutineCategory.matches('dance', 'kpop'), isTrue);
     expect(RoutineCategory.matches('dance', 'other'), isFalse);
   });
 
@@ -130,7 +138,7 @@ void main() {
     expect(routine.toFirestoreJson()['segments'][1]['isHighlight'], isTrue);
   });
 
-  test('Saved routine and showcase default missing category to dance', () {
+  test('Saved routine and showcase default missing category to kpop', () {
     final routine = SavedRoutine.fromJson({
       'id': 'r1',
       'name': 'Old routine',
@@ -139,8 +147,8 @@ void main() {
       'segments': const [],
       'createdAt': DateTime(2024, 1, 1).toIso8601String(),
     });
-    expect(routine.category, 'dance');
-    expect(routine.toJson()['category'], 'dance');
+    expect(routine.category, 'kpop');
+    expect(routine.toJson()['category'], 'kpop');
   });
 
   test('Practice result keeps the original loop range metadata on save and reload', () async {
@@ -239,18 +247,18 @@ void main() {
         ),
       ),
     );
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 100));
+    await tester.pumpAndSettle();
 
     final nav = tester.widget<NavigationBar>(find.byType(NavigationBar));
     expect(nav.selectedIndex, 0);
 
-    await tester.tap(find.widgetWithText(TextButton, '전체 보기'));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 100));
+    final viewAll = find.widgetWithText(TextButton, '전체 보기');
+    final viewAllKey = find.widgetWithText(TextButton, 'home.view_all');
+    await tester.tap(viewAll.evaluate().isNotEmpty ? viewAll : viewAllKey);
+    await tester.pumpAndSettle();
 
     final updatedNav = tester.widget<NavigationBar>(find.byType(NavigationBar));
-    expect(updatedNav.selectedIndex, 4);
+    expect(updatedNav.selectedIndex, 3);
   });
 
   test('Routine library creates and persists groups with ordered routine ids', () async {

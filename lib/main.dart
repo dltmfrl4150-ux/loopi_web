@@ -80,18 +80,25 @@ class _LoopiAppState extends State<LoopiApp> {
         return resolveAppLocale(deviceLocale);
       },
       theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: LoopiColors.purple),
+        colorScheme: ColorScheme.fromSeed(seedColor: LoopiColors.purple)
+            .copyWith(onPrimary: Colors.white),
         useMaterial3: true,
         scaffoldBackgroundColor: LoopiColors.canvas,
+        filledButtonTheme: FilledButtonThemeData(
+          style: FilledButton.styleFrom(foregroundColor: Colors.white),
+        ),
       ),
       darkTheme: ThemeData(
         colorScheme: ColorScheme.fromSeed(
           seedColor: LoopiColors.purple,
           brightness: Brightness.dark,
-        ),
+        ).copyWith(onPrimary: Colors.white),
         useMaterial3: true,
         scaffoldBackgroundColor: LoopiColors.darkCanvas,
         canvasColor: LoopiColors.darkCanvas,
+        filledButtonTheme: FilledButtonThemeData(
+          style: FilledButton.styleFrom(foregroundColor: Colors.white),
+        ),
       ),
       themeMode: ThemeMode.system,
       home: AuthGate(library: _library, userState: _userState),

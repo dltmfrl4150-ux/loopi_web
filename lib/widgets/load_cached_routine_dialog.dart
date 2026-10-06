@@ -22,7 +22,10 @@ Future<bool?> showLoadCachedRoutineDialog(BuildContext context) {
             child: const Text('새로 설정'),
           ),
           FilledButton(
-            style: FilledButton.styleFrom(backgroundColor: LoopiColors.deepPurple),
+            style: FilledButton.styleFrom(
+              backgroundColor: LoopiColors.deepPurple,
+              foregroundColor: Colors.white,
+            ),
             onPressed: () => Navigator.pop(dialogContext, true),
             child: const Text('가져오기'),
           ),

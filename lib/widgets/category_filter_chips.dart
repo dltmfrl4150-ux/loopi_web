@@ -18,12 +18,7 @@ class CategoryFilterBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    const chips = <String>[
-      RoutineCategory.all,
-      RoutineCategory.dance,
-      RoutineCategory.language,
-      RoutineCategory.other,
-    ];
+    final dark = LoopiColors.isDark(context);
 
     // Avoid a fixed short height — Material FilterChips were vertically clipped at 48px.
     return SingleChildScrollView(
@@ -31,11 +26,11 @@ class CategoryFilterBar extends StatelessWidget {
       padding: padding,
       child: Row(
         children: [
-          for (var i = 0; i < chips.length; i++) ...[
+          for (var i = 0; i < RoutineCategory.filterValues.length; i++) ...[
             if (i > 0) const SizedBox(width: 8),
             Builder(
               builder: (context) {
-                final id = chips[i];
+                final id = RoutineCategory.filterValues[i];
                 final isSelected = selected == id;
                 return FilterChip(
                   label: Text(RoutineCategory.labelKey(id).tr()),
@@ -45,13 +40,19 @@ class CategoryFilterBar extends StatelessWidget {
                   visualDensity: VisualDensity.compact,
                   padding: const EdgeInsets.symmetric(horizontal: 4),
                   labelPadding: const EdgeInsets.symmetric(horizontal: 8),
-                  selectedColor: LoopiColors.purple.withValues(alpha: 0.18),
-                  backgroundColor: Colors.white,
+                  selectedColor: LoopiColors.purple,
+                  backgroundColor: dark ? LoopiColors.darkSurface : Colors.white,
                   side: BorderSide(
-                    color: isSelected ? LoopiColors.purple : LoopiColors.line,
+                    color: isSelected
+                        ? LoopiColors.purple
+                        : (dark ? Colors.white24 : LoopiColors.line),
                   ),
                   labelStyle: TextStyle(
-                    color: isSelected ? LoopiColors.deepPurple : LoopiColors.ink,
+                    color: isSelected
+                        ? Colors.white
+                        : (dark
+                            ? Colors.white.withValues(alpha: 0.9)
+                            : LoopiColors.ink),
                     fontWeight: isSelected ? FontWeight.w800 : FontWeight.w600,
                   ),
                   onSelected: (_) => onSelected(id),
@@ -77,6 +78,8 @@ class CategoryChoiceChips extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final dark = LoopiColors.isDark(context);
+
     return Wrap(
       spacing: 8,
       runSpacing: 8,
@@ -85,9 +88,19 @@ class CategoryChoiceChips extends StatelessWidget {
           ChoiceChip(
             label: Text(RoutineCategory.labelKey(id).tr()),
             selected: selected == id,
-            selectedColor: LoopiColors.purple.withValues(alpha: 0.18),
+            selectedColor: LoopiColors.purple,
+            backgroundColor: dark ? Colors.white12 : null,
+            side: BorderSide(
+              color: selected == id
+                  ? LoopiColors.purple
+                  : (dark ? Colors.white24 : LoopiColors.line),
+            ),
             labelStyle: TextStyle(
-              color: selected == id ? LoopiColors.deepPurple : LoopiColors.ink,
+              color: selected == id
+                  ? Colors.white
+                  : (dark
+                      ? Colors.white.withValues(alpha: 0.9)
+                      : LoopiColors.ink),
               fontWeight: FontWeight.w700,
             ),
             onSelected: (_) => onSelected(id),

@@ -24,7 +24,7 @@ class CommunityShowcaseItem {
     this.thumbnailHint,
     this.thumbnailUrl,
     this.displayOrder = 0,
-    this.category = RoutineCategory.dance,
+    this.category = RoutineCategory.kpop,
   });
 
   final String id;
@@ -154,7 +154,7 @@ class CommunityRoutinePost {
     required this.trendingFavorites7d,
     required this.favoritedBy,
     this.displayOrder = 0,
-    this.category = RoutineCategory.dance,
+    this.category = RoutineCategory.kpop,
   });
 
   final String id;

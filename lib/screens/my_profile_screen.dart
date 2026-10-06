@@ -244,7 +244,10 @@ class _MyProfileScreenState extends State<MyProfileScreen> {
                       MaterialPageRoute<void>(builder: (_) => ProUpgradeScreen(userState: _userState)),
                     );
                   },
-                  style: FilledButton.styleFrom(backgroundColor: LoopiColors.deepPurple),
+                  style: FilledButton.styleFrom(
+                    backgroundColor: LoopiColors.deepPurple,
+                    foregroundColor: Colors.white,
+                  ),
                   child: Text('profile.upgrade'.tr()),
                 ),
             ],

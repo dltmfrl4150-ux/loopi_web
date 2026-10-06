@@ -41,9 +41,13 @@
   "category": {
     "label": "Category",
     "all": "All",
-    "dance": "Dance",
-    "language": "Language",
-    "other": "Other"
+    "kpop": "K-pop",
+    "choreo": "Choreo",
+    "hiphop": "Hiphop",
+    "zumba": "Zumba",
+    "other": "Others",
+    "dance": "K-pop",
+    "language": "Others"
   },
   "library": {
     "title": "My Dance Library",

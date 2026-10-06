@@ -197,6 +197,7 @@ class ClassDetailScreen extends StatelessWidget {
             ),
             style: FilledButton.styleFrom(
               backgroundColor: LoopiColors.deepPurple,
+              foregroundColor: Colors.white,
               padding: const EdgeInsets.symmetric(vertical: 16),
               shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
             ),

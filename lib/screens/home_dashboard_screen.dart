@@ -149,7 +149,9 @@ class _HomeDashboardScreenState extends State<HomeDashboardScreen> {
 
   Future<void> _sharePracticeResult(PracticeResult result) async {
     var category = RoutineCategory.normalize(
-      widget.library.byId(result.routineId)?.category ?? result.category,
+      widget.library.byId(result.routineId)?.category ??
+          result.sourceRoutine?.category ??
+          result.category,
     );
     final confirmed = await showDialog<bool>(
       context: context,
@@ -201,7 +203,7 @@ class _HomeDashboardScreenState extends State<HomeDashboardScreen> {
             ? ShowcaseMediaKind.audio
             : inferMediaKindFromPath(result.recordedPath),
         category: category,
-        routine: widget.library.byId(result.routineId),
+        routine: widget.library.byId(result.routineId) ?? result.sourceRoutine,
       );
       _bumpCommunityRefresh();
       if (!mounted) return;
@@ -967,6 +969,7 @@ class _RoutineCard extends StatelessWidget {
                     onPressed: onStart,
                     style: FilledButton.styleFrom(
                       backgroundColor: LoopiColors.purple,
+                      foregroundColor: Colors.white,
                       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
                       visualDensity: VisualDensity.compact,
                     ),
@@ -977,7 +980,14 @@ class _RoutineCard extends StatelessWidget {
                     OutlinedButton(
                       onPressed: onPractice,
                       style: OutlinedButton.styleFrom(
-                        foregroundColor: LoopiColors.purple,
+                        foregroundColor: LoopiColors.isDark(context)
+                            ? Colors.white
+                            : LoopiColors.purple,
+                        side: BorderSide(
+                          color: LoopiColors.isDark(context)
+                              ? Colors.white54
+                              : LoopiColors.purple,
+                        ),
                         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
                         visualDensity: VisualDensity.compact,
                       ),
@@ -1153,7 +1163,9 @@ class _LibraryTabState extends State<_LibraryTab> with SingleTickerProviderState
         bool matchesRoutine(SavedRoutine routine) =>
             RoutineCategory.matches(routine.category, _category);
         bool matchesPractice(PracticeResult result) => RoutineCategory.matches(
-              widget.library.byId(result.routineId)?.category ?? result.category,
+              widget.library.byId(result.routineId)?.category ??
+                  result.sourceRoutine?.category ??
+                  result.category,
               _category,
             );
         final groups = [
@@ -1401,7 +1413,8 @@ class _LibraryTabState extends State<_LibraryTab> with SingleTickerProviderState
                                 setState(() {});
                                 return;
                               }
-                              final routine = widget.library.byId(result.routineId);
+                              final routine = widget.library.byId(result.routineId) ??
+                                  result.sourceRoutine;
                               if (routine == null) {
                                 ScaffoldMessenger.of(context).showSnackBar(
                                   const SnackBar(

@@ -17,6 +17,11 @@ bool isYoutubeInteropError(Object error) {
       msg.contains("type 'double' is not a subtype of type 'Map<String, dynamic>'") ||
       msg.contains('Map<String, dynamic>') ||
       msg.contains(r'map[$_get]') ||
+      // iframe postMessage noise: non-JSON strings from other frames / YT internals
+      error is FormatException ||
+      msg.contains('FormatException') ||
+      msg.contains('Unexpected token') ||
+      msg.contains('is not valid JSON') ||
       (msg.contains('TypeError') &&
           (msg.contains('is not a function') || msg.contains('Map')));
 }
@@ -29,10 +34,30 @@ void installYoutubeInteropErrorGuard() {
   final previous = PlatformDispatcher.instance.onError;
   PlatformDispatcher.instance.onError = (Object error, StackTrace stack) {
     if (isYoutubeInteropError(error)) {
+      // Keep console quieter for expected iframe JSON spam.
+      if (error is FormatException ||
+          error.toString().contains('FormatException') ||
+          error.toString().contains('is not valid JSON')) {
+        return true;
+      }
       debugPrint('Ignored YouTube interop error to keep listener alive: $error');
       return true;
     }
     return previous?.call(error, stack) ?? false;
+  };
+  final previousFlutter = FlutterError.onError;
+  FlutterError.onError = (FlutterErrorDetails details) {
+    final exception = details.exception;
+    if (isYoutubeInteropError(exception)) {
+      if (exception is FormatException ||
+          exception.toString().contains('FormatException') ||
+          exception.toString().contains('is not valid JSON')) {
+        return;
+      }
+      debugPrint('Ignored YouTube FlutterError: $exception');
+      return;
+    }
+    previousFlutter?.call(details);
   };
 }
 
