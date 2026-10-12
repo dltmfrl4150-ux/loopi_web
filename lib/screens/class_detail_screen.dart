@@ -5,6 +5,7 @@ import '../models/class_models.dart';
 import '../models/routine_category.dart';
 import '../services/class_catalog.dart';
 import '../theme/loopi_colors.dart';
+import '../utils/instant_player_route.dart';
 import '../widgets/cached_remote_image.dart';
 import 'class_player_screen.dart';
 
@@ -161,8 +162,8 @@ class ClassDetailScreen extends StatelessWidget {
                 trailing: const Icon(Icons.play_circle_fill, color: LoopiColors.purple),
                 onTap: () {
                   Navigator.of(context).push(
-                    MaterialPageRoute<void>(
-                      builder: (_) => ClassPlayerScreen(
+                    instantPlayerRoute(
+                      ClassPlayerScreen(
                         course: live,
                         initialUnitIndex: i,
                       ),
@@ -182,9 +183,7 @@ class ClassDetailScreen extends StatelessWidget {
                 catalog.enroll(live.id);
               }
               Navigator.of(context).push(
-                MaterialPageRoute<void>(
-                  builder: (_) => ClassPlayerScreen(course: live),
-                ),
+                instantPlayerRoute(ClassPlayerScreen(course: live)),
               );
             },
             icon: const Icon(Icons.play_arrow_rounded),

@@ -12,6 +12,7 @@ import '../services/database_service.dart';
 import '../state/routine_library.dart';
 import '../state/user_state.dart';
 import '../theme/loopi_colors.dart';
+import '../utils/instant_player_route.dart';
 import '../utils/media_limits.dart';
 import '../utils/time_format.dart';
 import '../utils/youtube_id.dart';
@@ -224,8 +225,8 @@ class _HomeDashboardScreenState extends State<HomeDashboardScreen> {
     PlatformFile? file,
   }) {
     Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        builder: (_) => LinkStudioScreen(
+      instantPlayerRoute(
+        LinkStudioScreen(
           library: widget.library,
           sourceType: sourceType,
           file: file,
@@ -236,8 +237,8 @@ class _HomeDashboardScreenState extends State<HomeDashboardScreen> {
 
   void _openEditRoutine(SavedRoutine routine) {
     Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        builder: (_) => LinkStudioScreen(
+      instantPlayerRoute(
+        LinkStudioScreen(
           library: widget.library,
           editingRoutine: routine,
           initialVideoUrl: routine.videoUrl.isNotEmpty ? routine.videoUrl : kDefaultVideoUrl,
@@ -321,8 +322,8 @@ class _HomeDashboardScreenState extends State<HomeDashboardScreen> {
 
   void _openRoutinePlayer(SavedRoutine routine) {
     Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        builder: (_) => RoutinePlayerScreen(
+      instantPlayerRoute(
+        RoutinePlayerScreen(
           routine: routine,
           library: widget.library,
           onOpenInShell: _openInShell,
@@ -1300,8 +1301,8 @@ class _LibraryTabState extends State<_LibraryTab> with SingleTickerProviderState
                             final playlist = widget.library.routinesForGroup(group);
                             if (playlist.isEmpty) return;
                             Navigator.of(context).push(
-                              MaterialPageRoute<void>(
-                                builder: (_) => PracticeModeScreen(
+                              instantPlayerRoute(
+                                PracticeModeScreen(
                                   library: widget.library,
                                   routine: playlist.first,
                                   routines: playlist,
@@ -1597,8 +1598,8 @@ class CommunityFeedScreen extends StatelessWidget {
       return;
     }
     Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        builder: (_) => RoutinePlayerScreen(routine: routine, library: library),
+      instantPlayerRoute(
+        RoutinePlayerScreen(routine: routine, library: library),
       ),
     );
   }
@@ -1738,8 +1739,8 @@ class UserProfileRoutinesScreen extends StatelessWidget {
             title: Text(routine.name),
             subtitle: Text(post.description),
             onTap: () => Navigator.of(context).push(
-              MaterialPageRoute<void>(
-                builder: (_) => RoutinePlayerScreen(routine: routine, library: library),
+              instantPlayerRoute(
+                RoutinePlayerScreen(routine: routine, library: library),
               ),
             ),
           );

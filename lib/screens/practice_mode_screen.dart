@@ -64,7 +64,6 @@ class PracticeModeScreenState extends State<PracticeModeScreen>
   DateTime? _ignoreUntil;
   bool _delayPending = false;
   bool _isPlaying = false;
-  bool _playPauseBusy = false;
   bool _isSeeking = false;
   bool _segmentFinished = false;
   bool _pollBusy = false;
@@ -756,6 +755,7 @@ class PracticeModeScreenState extends State<PracticeModeScreen>
   /// another screen (e.g. Practice Mode).
   Future<void> pausePlayback() async {
     _cancelBoundaryPoll();
+    if (mounted) setState(() => _isPlaying = false);
     if (_inWidgetTest) {
       _isPlaying = false;
       return;
@@ -777,31 +777,22 @@ class PracticeModeScreenState extends State<PracticeModeScreen>
   }
 
   Future<void> _togglePlayPause() async {
-    if (_inWidgetTest || !_ready || _playPauseBusy || _disposing) return;
-    _playPauseBusy = true;
+    if (_inWidgetTest || !_ready || _disposing) return;
     try {
-      // Decide from the iframe, not the icon flag. The icon can lag on first load.
-      final playerState = _currentRoutine.sourceType == SourceType.youtube && _youtubeInitialized
-          ? _youtubePlayer.value.playerState
-          : null;
-      final shouldPause = playerState != null
-          ? playerState == PlayerState.playing || playerState == PlayerState.buffering
-          : _isPlaying;
-      if (shouldPause) {
+      if (_isPlaying) {
+        setState(() => _isPlaying = false);
         await pausePlayback();
       } else {
+        setState(() => _isPlaying = true);
         switch (_currentRoutine.sourceType) {
           case SourceType.youtube:
-            if (!_youtubeAlive) return;
-            await _youtubePlayer.playVideo();
+            if (_youtubeAlive) await _youtubePlayer.playVideo();
             break;
           case SourceType.localVideo:
-            if (_videoPlayer == null || _videoPlayer?.value.isInitialized != true) return;
-            await _videoPlayer!.play();
+            await _videoPlayer?.play();
             break;
           case SourceType.audio:
-            if (_audioPlayer == null) return;
-            await _audioPlayer!.resume();
+            await _audioPlayer?.resume();
             break;
         }
         final now = await _getCurrentTime();
@@ -810,8 +801,6 @@ class PracticeModeScreenState extends State<PracticeModeScreen>
       }
     } catch (e) {
       debugPrint('[LOOPI] play/pause ignored: $e');
-    } finally {
-      _playPauseBusy = false;
     }
   }
 
@@ -1360,44 +1349,46 @@ class PracticeModeScreenState extends State<PracticeModeScreen>
 
   Widget _sectionCircleButton(int index, {bool compact = false}) {
     final highlight = _currentRoutine.segments[index].isHighlight;
-    return Material(
-      color: index == _segmentIndex ? LoopiColors.purple : const Color(0xFF2A2438),
-      shape: CircleBorder(
-        side: highlight
-            ? BorderSide(color: kHighlightGold, width: compact ? 1.6 : 2.4)
-            : BorderSide.none,
+    return Container(
+      decoration: BoxDecoration(
+        color: index == _segmentIndex ? LoopiColors.purple : const Color(0xFF2A2438),
+        shape: BoxShape.circle,
+        border: highlight
+            ? Border.all(color: kHighlightGold, width: compact ? 1.6 : 2.4)
+            : null,
       ),
-      shadowColor: highlight ? kHighlightGold : Colors.transparent,
-      elevation: highlight ? (compact ? 2 : 5) : 0,
-      child: InkWell(
-        customBorder: const CircleBorder(),
-        onTap: () => _jumpToSegment(index),
-        child: Stack(
-          fit: StackFit.expand,
-          children: [
-            Center(
-              child: FittedBox(
-                fit: BoxFit.scaleDown,
-                child: Padding(
-                  padding: EdgeInsets.all(compact ? 3 : 6),
-                  child: Text(
-                    sectionLabelForIndex(index),
-                    style: TextStyle(
-                      color: Colors.white,
-                      fontWeight: FontWeight.w700,
-                      fontSize: compact ? 12 : 14,
+      child: Material(
+        type: MaterialType.transparency,
+        child: InkWell(
+          customBorder: const CircleBorder(),
+          onTap: () => _jumpToSegment(index),
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              Center(
+                child: FittedBox(
+                  fit: BoxFit.scaleDown,
+                  child: Padding(
+                    padding: EdgeInsets.all(compact ? 3 : 6),
+                    child: Text(
+                      sectionLabelForIndex(index),
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.w700,
+                        fontSize: compact ? 12 : 14,
+                      ),
                     ),
                   ),
                 ),
               ),
-            ),
-            if (highlight)
-              Positioned(
-                top: compact ? 1 : 2,
-                right: compact ? 1 : 2,
-                child: HighlightCrown(size: compact ? 8 : 11),
-              ),
-          ],
+              if (highlight)
+                Positioned(
+                  top: compact ? 1 : 2,
+                  right: compact ? 1 : 2,
+                  child: HighlightCrown(size: compact ? 8 : 11),
+                ),
+            ],
+          ),
         ),
       ),
     );
@@ -1598,9 +1589,6 @@ class PracticeModeScreenState extends State<PracticeModeScreen>
                     style: TextStyle(
                       color: Colors.white.withValues(alpha: 0.72),
                       fontSize: 11,
-                      shadows: const [
-                        Shadow(blurRadius: 6, color: Colors.black87),
-                      ],
                     ),
                   ),
                 ),

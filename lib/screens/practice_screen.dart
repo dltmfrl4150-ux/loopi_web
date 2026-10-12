@@ -16,6 +16,7 @@ import '../models/routine_models.dart';
 import '../state/routine_library.dart';
 import '../state/shadowing_sequence_controller.dart';
 import '../theme/loopi_colors.dart';
+import '../utils/instant_player_route.dart';
 import '../utils/time_format.dart';
 import '../utils/media_blob.dart';
 import '../utils/camera_release.dart';
@@ -315,7 +316,7 @@ class PracticeScreen extends StatelessWidget {
         );
         break;
     }
-    Navigator.of(context).push(MaterialPageRoute<void>(builder: (_) => screen));
+    Navigator.of(context).push(instantPlayerRoute(screen));
   }
 
   @override
@@ -2721,7 +2722,7 @@ class _VideoPracticeScreenState extends State<VideoPracticeScreen> {
       }
       if (!mounted) return;
       await Navigator.of(context).pushReplacement(
-        MaterialPageRoute<void>(builder: (_) => review),
+        instantPlayerRoute(review),
       );
     } catch (error, stack) {
       debugPrint('navigate to comparison failed: $error\n$stack');

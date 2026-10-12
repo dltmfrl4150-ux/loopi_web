@@ -12,6 +12,7 @@ import '../services/database_service.dart';
 import '../state/routine_library.dart';
 import '../state/user_state.dart';
 import '../theme/loopi_colors.dart';
+import '../utils/instant_player_route.dart';
 import '../utils/youtube_id.dart';
 import '../widgets/cached_remote_image.dart';
 import '../widgets/class_course_card.dart';
@@ -158,8 +159,8 @@ class _UserProfileScreenState extends State<UserProfileScreen> with SingleTicker
 
   void _openRoutine(SavedRoutine routine) {
     Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        builder: (_) => RoutinePlayerScreen(routine: routine, library: widget.library),
+      instantPlayerRoute(
+        RoutinePlayerScreen(routine: routine, library: widget.library),
       ),
     );
   }

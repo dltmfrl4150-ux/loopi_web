@@ -18,6 +18,7 @@ import '../state/link_studio_session.dart';
 import '../state/routine_library.dart';
 import '../theme/loopi_colors.dart';
 import '../utils/cached_video.dart';
+import '../utils/instant_player_route.dart';
 import '../utils/time_format.dart';
 import '../utils/youtube_id.dart';
 import '../utils/youtube_player_factory.dart';
@@ -1116,8 +1117,8 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> {
     }
 
     await Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        builder: (_) => PracticeModeScreen(routine: routine, library: widget.library),
+      instantPlayerRoute(
+        PracticeModeScreen(routine: routine, library: widget.library),
       ),
     );
   }

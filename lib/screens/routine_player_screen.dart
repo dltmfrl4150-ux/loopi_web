@@ -38,7 +38,11 @@ class _RoutinePlayerScreenState extends State<RoutinePlayerScreen> {
       return;
     }
     await Navigator.of(context).push(
-      MaterialPageRoute<void>(builder: (_) => practice),
+      PageRouteBuilder<void>(
+        pageBuilder: (context, animation, secondaryAnimation) => practice,
+        transitionDuration: Duration.zero,
+        reverseTransitionDuration: Duration.zero,
+      ),
     );
   }
 

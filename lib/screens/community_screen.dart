@@ -9,6 +9,7 @@ import 'package:flutter/material.dart';
 import 'package:video_player/video_player.dart';
 
 import '../models/community_models.dart';
+import '../utils/instant_player_route.dart';
 import '../models/class_models.dart';
 import '../models/routine_category.dart';
 import '../models/routine_models.dart';
@@ -285,8 +286,8 @@ class CommunityScreenState extends State<CommunityScreen> with SingleTickerProvi
       return;
     }
     Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        builder: (_) => RoutinePlayerScreen(routine: routine, library: widget.library),
+      instantPlayerRoute(
+        RoutinePlayerScreen(routine: routine, library: widget.library),
       ),
     );
   }
