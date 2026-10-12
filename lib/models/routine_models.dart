@@ -18,8 +18,17 @@ const List<int> kDelaySeconds = [0, 1, 2, 3, 5, 10, 30, 60];
 /// Loop count of `-1` means infinite.
 const int kInfiniteLoop = -1;
 
+/// Excel-style section labels: A…Z, then AA, AB, …
 String sectionLabelForIndex(int index) {
-  return String.fromCharCode(65 + (index % 26));
+  if (index < 0) return '';
+  var n = index + 1;
+  final chars = <int>[];
+  while (n > 0) {
+    n--;
+    chars.add(65 + (n % 26));
+    n ~/= 26;
+  }
+  return String.fromCharCodes(chars.reversed);
 }
 
 String formatSpeedLabel(double speed) => '${speed.toStringAsFixed(1)}x';

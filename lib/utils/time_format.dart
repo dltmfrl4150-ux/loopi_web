@@ -1,50 +1,28 @@
-/// Formats a duration in seconds as `mm:ss`.
-String formatMmSs(double seconds) {
-  final total = seconds.round().clamp(0, 99 * 60 + 59);
-  final minutes = total ~/ 60;
-  final secs = total % 60;
-  return '${minutes.toString().padLeft(2, '0')}:${secs.toString().padLeft(2, '0')}';
-}
-
-/// Parses `mm:ss`, `m:ss`, `hh:mm:ss`, digit strings like `0100`, or a
-/// seconds value into total seconds.
+/// Formats a duration in seconds as total minutes:seconds (`MMM:SS`).
 ///
-/// Digit-only input is treated as `MMSS` (not raw seconds): `0100` → 60,
-/// `0219` → 139. Seconds past 59 roll over into minutes.
+/// Minutes are not capped at 99, so long videos format as e.g. `124:57`.
+String formatMmSs(double seconds) {
+  final totalSeconds = seconds.round().clamp(0, 0x7fffffff);
+  final minutes = (totalSeconds ~/ 60).toString().padLeft(2, '0');
+  final secs = (totalSeconds % 60).toString().padLeft(2, '0');
+  return '$minutes:$secs';
+}
+
+/// Parses typed time into total seconds.
+///
+/// Non-digits are stripped first (`111:44` → `11144`), then the string is
+/// read from the rear:
+/// - 1–2 digits → seconds (`5` → 5, `20` → 20)
+/// - 3+ digits → last 2 are seconds, leading digits are minutes
+///   (`120` → 80, `1144` → 704, `11144` → 6704)
 double? parseTimeInput(String raw) {
-  final text = raw.trim();
-  if (text.isEmpty) return null;
-
-  if (text.contains(':')) {
-    final parts = text.split(':');
-    if (parts.length != 2 && parts.length != 3) return null;
-    final numbers = <int>[];
-    for (final part in parts) {
-      if (part.isEmpty) return null;
-      final n = int.tryParse(part);
-      if (n == null || n < 0) return null;
-      numbers.add(n);
-    }
-    if (parts.length == 2) {
-      return _minutesAndSeconds(numbers[0], numbers[1]);
-    }
-    return _hoursMinutesSeconds(numbers[0], numbers[1], numbers[2]);
-  }
-
-  final digits = text.replaceAll(RegExp(r'[^0-9]'), '');
+  final digits = raw.trim().replaceAll(RegExp(r'[^0-9]'), '');
   if (digits.isEmpty) return null;
-  final padded = digits.length >= 4 ? digits : digits.padLeft(4, '0');
-  final minutes = int.tryParse(padded.substring(0, padded.length - 2)) ?? 0;
-  final seconds = int.tryParse(padded.substring(padded.length - 2)) ?? 0;
-  return _minutesAndSeconds(minutes, seconds);
-}
 
-double _minutesAndSeconds(int minutes, int seconds) {
-  final totalSeconds = (minutes * 60) + seconds;
-  if (totalSeconds < 0) return 0;
-  return totalSeconds.toDouble();
-}
-
-double _hoursMinutesSeconds(int hours, int minutes, int seconds) {
-  return _minutesAndSeconds(hours * 60 + minutes, seconds);
+  final total = digits.length <= 2
+      ? int.parse(digits)
+      : int.parse(digits.substring(0, digits.length - 2)) * 60 +
+          int.parse(digits.substring(digits.length - 2));
+  if (total < 0) return 0;
+  return total.toDouble();
 }

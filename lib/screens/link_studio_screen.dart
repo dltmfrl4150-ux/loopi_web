@@ -86,7 +86,7 @@ class LinkStudioScreen extends StatefulWidget {
   State<LinkStudioScreen> createState() => _LinkStudioScreenState();
 }
 
-class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBindingObserver {
+class _LinkStudioScreenState extends State<LinkStudioScreen> {
   final LinkStudioSession _session = LinkStudioSession();
   final TextEditingController _urlController = TextEditingController();
   final List<TextEditingController> _startControllers = [];
@@ -118,12 +118,9 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
 
   int _highlightedSection = 0;
   Completer<void>? _delayCompleter;
-  String? _lastDetectedClipboardText;
-  String? _dismissedClipboardRaw;
   String? _mediaObjectUrl;
   bool _audioLoading = false;
   String? _videoLoadError;
-  bool _showClipboardBanner = false;
   bool? _isMirrored = false;
   bool _disposing = false;
   /// Best-effort title from iframe metadata (no YouTube Data API).
@@ -173,7 +170,6 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addObserver(this);
     final editing = widget.editingRoutine;
     if (editing != null) {
       _videoUrl = editing.videoUrl.isNotEmpty ? editing.videoUrl : kDefaultVideoUrl;
@@ -195,12 +191,6 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
     }
     _syncRowControllers();
     _session.addListener(_onSessionChanged);
-
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted && widget.active) {
-        unawaited(_checkClipboardForDetectedLink());
-      }
-    });
 
     final sourceType = editing?.sourceType ?? widget.sourceType;
     switch (sourceType) {
@@ -241,8 +231,6 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
     super.didUpdateWidget(oldWidget);
     if (oldWidget.active && !widget.active) {
       _haltPlayback(stopTest: true);
-    } else if (!oldWidget.active && widget.active) {
-      unawaited(_checkClipboardForDetectedLink());
     }
   }
 
@@ -448,9 +436,10 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
 
   void _onTimeChanged(String value, int index, bool isStart) {
     if (value.isEmpty) return;
+    // Live-commit only once the rear-seconds form is unambiguous (3+ digits
+    // or an explicit colon). Short "20" / "5" wait for submit / focus loss.
     final digits = value.replaceAll(RegExp(r'[^0-9]'), '');
-    final hasColon = value.contains(':');
-    final complete = (hasColon && value.split(':').length >= 2) || digits.length >= 4;
+    final complete = value.contains(':') || digits.length >= 3;
     if (!complete) return;
     if (parseTimeInput(value) == null) return;
     _commitTimeField(index: index, isStart: isStart, allowSeek: true);
@@ -700,87 +689,6 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
     }
   }
 
-  void _dismissClipboardBanner({String? rawClipboard}) {
-    if (!mounted) {
-      _showClipboardBanner = false;
-      _dismissedClipboardRaw = rawClipboard ?? _dismissedClipboardRaw;
-      return;
-    }
-    setState(() {
-      _showClipboardBanner = false;
-      _dismissedClipboardRaw = rawClipboard ?? _dismissedClipboardRaw;
-    });
-    ScaffoldMessenger.maybeOf(context)?.hideCurrentSnackBar();
-  }
-
-  Future<void> _checkClipboardForDetectedLink() async {
-    String? text;
-    try {
-      final clipboardData = await Clipboard.getData(Clipboard.kTextPlain);
-      text = clipboardData?.text?.trim();
-    } catch (error) {
-      // Flutter Web throws paste_fail when clipboard permission is denied
-      // or the read is not tied to a user gesture.
-      debugPrint('Clipboard.getData detection skipped: $error');
-      return;
-    }
-    if (text == null || text.isEmpty) return;
-    // Ignore the same copied text until the clipboard actually changes.
-    if (text == _dismissedClipboardRaw) return;
-
-    final normalized = _normalizeYoutubeUrl(text);
-    if (normalized == null) return;
-    if (_showClipboardBanner && normalized == _lastDetectedClipboardText) return;
-
-    _lastDetectedClipboardText = normalized;
-    if (!mounted) return;
-
-    _urlController.text = normalized;
-    setState(() => _showClipboardBanner = true);
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).clearSnackBars();
-    ScaffoldMessenger.of(context)
-        .showSnackBar(
-      SnackBar(
-        content: Text('link_studio.detected_copied_link'.tr()),
-        showCloseIcon: true,
-        closeIconColor: Colors.redAccent,
-        action: SnackBarAction(
-          label: 'studio.load'.tr(),
-          onPressed: () {
-            _dismissClipboardBanner(rawClipboard: text);
-            _loadUrl();
-          },
-        ),
-        duration: const Duration(seconds: 10),
-      ),
-    )
-        .closed
-        .then((reason) {
-      if (!mounted) return;
-      if (reason == SnackBarClosedReason.action) return;
-      setState(() => _showClipboardBanner = false);
-      if (reason == SnackBarClosedReason.dismiss ||
-          reason == SnackBarClosedReason.swipe ||
-          reason == SnackBarClosedReason.timeout) {
-        _dismissedClipboardRaw = text;
-      }
-    });
-  }
-
-  @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed) {
-      unawaited(_checkClipboardForDetectedLink());
-      return;
-    }
-    if (state == AppLifecycleState.inactive ||
-        state == AppLifecycleState.paused ||
-        state == AppLifecycleState.hidden) {
-      _haltPlayback();
-    }
-  }
-
   Future<void> _selectRow(int index) async {
     if (_session.isTesting) return;
     _routineSessionId++;
@@ -792,6 +700,72 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
     final segment = _session.segments[index];
     _applySpeed(segment.speed);
     _seekTo(segment.startSec, force: true);
+  }
+
+  Future<void> _onAddSectionPressed() async {
+    if (_session.isTesting) return;
+    _routineSessionId++;
+    _routineTimer?.cancel();
+    _loopPlaybackTimer?.cancel();
+    _playbackMonitorTimer?.cancel();
+    _session.addSegment();
+    final segment = _session.active;
+    _applySpeed(segment.speed);
+    _seekTo(segment.startSec, force: true);
+  }
+
+  Future<double?> _resolveMediaDurationSec() async {
+    switch (_session.sourceType) {
+      case SourceType.youtube:
+        if (_youtubeInitialized) {
+          try {
+            final metaSec = _youtubePlayer.metadata.duration.inMilliseconds / 1000.0;
+            if (metaSec > 1) return metaSec;
+          } catch (_) {}
+          try {
+            final live = await _yt(() => _youtubePlayer.duration);
+            if (live != null && live > 1) return live;
+          } catch (_) {}
+        }
+        break;
+      case SourceType.localVideo:
+        final player = _videoPlayer;
+        if (player != null && player.value.isInitialized) {
+          final sec = player.value.duration.inMilliseconds / 1000.0;
+          if (sec > 1) return sec;
+        }
+        break;
+      case SourceType.audio:
+        try {
+          final d = await _audioPlayer?.getDuration();
+          final sec = (d?.inMilliseconds ?? 0) / 1000.0;
+          if (sec > 1) return sec;
+        } catch (_) {}
+        break;
+    }
+    if (_session.videoDuration > 1) return _session.videoDuration;
+    return null;
+  }
+
+  Future<void> _autoGenerateTenSecondRoutine() async {
+    if (_session.isTesting) return;
+    final duration = await _resolveMediaDurationSec();
+    if (!mounted) return;
+    if (duration == null || duration <= 1) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('studio.auto_10s_need_duration'.tr())),
+      );
+      return;
+    }
+
+    _routineSessionId++;
+    _routineTimer?.cancel();
+    _loopPlaybackTimer?.cancel();
+    _playbackMonitorTimer?.cancel();
+    _session.generateTenSecondSections(duration: duration);
+    final first = _session.active;
+    _applySpeed(first.speed);
+    _seekTo(first.startSec, force: true);
   }
 
   void _onRangeChangeStart(RangeValues values) {
@@ -1151,7 +1125,6 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
   @override
   void dispose() {
     _disposing = true;
-    WidgetsBinding.instance.removeObserver(this);
     _haltPlayback();
     _loopPlaybackTimer?.cancel();
     _delayTimer?.cancel();
@@ -1510,6 +1483,7 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
                 controller: _urlController,
                 enabled: !_session.isTesting,
                 textAlignVertical: TextAlignVertical.center,
+                onTap: () => _urlController.clear(),
                 decoration: InputDecoration(
                   border: InputBorder.none,
                   hintText: 'Paste a YouTube URL',
@@ -1802,8 +1776,23 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
                   ),
                 ),
                 if (_session.sourceType != SourceType.audio) _mirrorToggleButton(),
+                Tooltip(
+                  message: 'studio.auto_10s_routine'.tr(),
+                  child: TextButton.icon(
+                    onPressed: testing ? null : _autoGenerateTenSecondRoutine,
+                    style: TextButton.styleFrom(
+                      foregroundColor: LoopiColors.deepPurple,
+                      padding: const EdgeInsets.symmetric(horizontal: 10),
+                    ),
+                    icon: const Icon(Icons.auto_awesome, size: 18),
+                    label: Text(
+                      'studio.auto_10s_routine_short'.tr(),
+                      style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 12),
+                    ),
+                  ),
+                ),
                 IconButton.filled(
-                  onPressed: testing ? null : _session.addSegment,
+                  onPressed: testing ? null : _onAddSectionPressed,
                   style: IconButton.styleFrom(backgroundColor: LoopiColors.deepPurple),
                   icon: const Icon(Icons.add, color: Colors.white),
                   tooltip: 'studio.add_section'.tr(),
@@ -1922,14 +1911,21 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
         DataCell(_scaleDownCell(compact: true, child: _loopDropdown(index, testing))),
         DataCell(_scaleDownCell(compact: true, child: _delayDropdown(index, testing))),
         DataCell(
-          IconButton(
-            tooltip: 'Delete section',
-            visualDensity: compact ? VisualDensity.compact : VisualDensity.standard,
-            onPressed: testing || index == 0 || _session.segments.length <= 1
-                ? null
-                : () => _session.removeSegment(index),
-            icon: const Icon(Icons.delete_outline, color: Colors.redAccent),
-          ),
+          index == 0
+              ? const SizedBox.shrink()
+              : IconButton(
+                  tooltip: 'Delete section',
+                  visualDensity: compact ? VisualDensity.compact : VisualDensity.standard,
+                  onPressed: testing || _session.segments.length <= 1
+                      ? null
+                      : () => _session.removeSegment(index),
+                  icon: Icon(
+                    Icons.delete_outline,
+                    color: testing || _session.segments.length <= 1
+                        ? Colors.grey
+                        : Colors.redAccent,
+                  ),
+                ),
         ),
       ],
     );
@@ -2010,13 +2006,19 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> with WidgetsBinding
     bool compact = false,
   }) {
     return SizedBox(
-      width: compact ? 56 : 72,
+      width: compact ? 72 : 88,
       child: TextField(
         controller: isStart ? _startControllers[index] : _endControllers[index],
         focusNode: isStart ? _startFocus[index] : _endFocus[index],
         enabled: enabled,
         textAlign: TextAlign.center,
         style: TextStyle(fontSize: compact ? 12 : 13, fontWeight: FontWeight.w600),
+        keyboardType: TextInputType.datetime,
+        inputFormatters: [
+          // Allow numeric shorthand (`11144`) and `MMM:SS` (`111:44`).
+          LengthLimitingTextInputFormatter(7),
+          FilteringTextInputFormatter.allow(RegExp(r'[0-9:]')),
+        ],
         decoration: InputDecoration(
           isDense: true,
           border: const OutlineInputBorder(),

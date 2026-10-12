@@ -45,19 +45,36 @@ class LinkStudioSession extends ChangeNotifier {
   List<int>? get localDataBytes => _localDataBytes;
 
   static double _defaultEnd(double duration) {
-    if (duration <= minGap) return duration;
-    return 30.clamp(minGap, duration).toDouble();
+    if (duration <= 0) return minGap;
+    return duration;
   }
 
   void setVideoDuration(double duration) {
     if (duration <= 0) return;
-    if ((duration - _videoDuration).abs() < 0.05) return;
-    _videoDuration = duration;
+    final prevDuration = _videoDuration;
+    final durationUnchanged = (duration - prevDuration).abs() < 0.05;
 
-    // Only expand the default first-segment end when there is a single section.
-    // Multi-section routines must keep author-set windows (do not stretch A→full).
-    if (_segments.length == 1 && (_segments[0].endSec - 30.0).abs() < 0.05) {
-      _segments[0] = _segments[0].copyWith(endSec: duration);
+    // Single default section (30s placeholder or full previous duration) expands
+    // to the newly known full video length.
+    final single = _segments.length == 1;
+    final end = single ? _segments[0].endSec : 0.0;
+    final shouldStretchToFull = single &&
+        _segments[0].startSec <= 0.05 &&
+        ((end - 30.0).abs() < 0.05 ||
+            (end - prevDuration).abs() < 0.05 ||
+            end >= prevDuration - 0.05);
+
+    if (durationUnchanged) {
+      if (shouldStretchToFull && (end - duration).abs() >= 0.05) {
+        _segments[0] = _segments[0].copyWith(startSec: 0, endSec: duration);
+        notifyListeners();
+      }
+      return;
+    }
+
+    _videoDuration = duration;
+    if (shouldStretchToFull) {
+      _segments[0] = _segments[0].copyWith(startSec: 0, endSec: duration);
     }
 
     for (var i = 0; i < _segments.length; i++) {
@@ -135,19 +152,79 @@ class LinkStudioSession extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Duplicate the selected section and insert it immediately after.
+  /// Alphabet labels stay sequential via [sectionLabelForIndex].
   void addSegment() {
-    final last = _segments.last;
-    _segments.add(
+    if (isTesting) return;
+    final source = _segments[_selectedIndex];
+    final insertAt = _selectedIndex + 1;
+    _segments.insert(
+      insertAt,
       RoutineSegment(
         id: 'seg_${_idSeed++}',
-        startSec: last.startSec,
-        endSec: last.endSec,
-        speed: last.speed,
-        loopCount: last.loopCount,
-        delaySec: last.delaySec,
+        startSec: source.startSec,
+        endSec: source.endSec,
+        speed: source.speed,
+        loopCount: source.loopCount,
+        delaySec: source.delaySec,
       ),
     );
-    _selectedIndex = _segments.length - 1;
+    _selectedIndex = insertAt;
+    notifyListeners();
+  }
+
+  /// Replace all sections with consecutive 10s chunks at 0.7x from 0→duration.
+  void generateTenSecondSections({double? duration}) {
+    if (isTesting) return;
+    if (duration != null && duration > 0) {
+      _videoDuration = duration;
+    }
+    final total = _videoDuration;
+    if (total <= 0) return;
+
+    final next = <RoutineSegment>[];
+    var start = 0.0;
+    var id = 0;
+    while (start < total - 0.0001) {
+      var end = (start + 10.0).clamp(0.0, total);
+      // Absorb a tiny leftover that would be shorter than [minGap].
+      final remainingAfter = total - end;
+      if (remainingAfter > 0 && remainingAfter < minGap) {
+        end = total;
+      }
+      if (end - start < minGap) {
+        if (next.isEmpty) {
+          next.add(
+            RoutineSegment(
+              id: 'seg_${id++}',
+              startSec: 0,
+              endSec: total.clamp(minGap, total),
+              speed: 0.7,
+            ),
+          );
+        } else {
+          final last = next.removeLast();
+          next.add(last.copyWith(endSec: total));
+        }
+        break;
+      }
+      next.add(
+        RoutineSegment(
+          id: 'seg_${id++}',
+          startSec: start,
+          endSec: end,
+          speed: 0.7,
+        ),
+      );
+      start = end;
+      if (end >= total) break;
+    }
+
+    _segments
+      ..clear()
+      ..addAll(next);
+    _selectedIndex = 0;
+    _idSeed = _segments.length + 1;
     notifyListeners();
   }
 

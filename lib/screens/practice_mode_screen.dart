@@ -67,7 +67,15 @@ class PracticeModeScreenState extends State<PracticeModeScreen>
   bool _playPauseBusy = false;
   bool _isSeeking = false;
   bool _segmentFinished = false;
+  bool _pollBusy = false;
+  int _pollEpoch = 0;
   int _loopsCompleted = 0;
+  /// Wall-clock fallback when YouTube `currentTime` stalls on web.
+  DateTime? _sectionWallStart;
+  double _sectionAnchorSec = 0;
+  double _sectionSpeed = 1;
+  double _lastReportedSec = 0;
+  DateTime? _lastReportedAt;
   // Guards segment/routine transitions so a burst of position callbacks can't
   // re-enter the advance logic while a previous transition is still in flight.
   bool _isAdvancing = false;
@@ -120,25 +128,136 @@ class PracticeModeScreenState extends State<PracticeModeScreen>
     _segmentIndex = 0;
     _loopsCompleted = 0;
     _segmentFinished = false;
+    _isPlaying = false;
 
-    _initializePlayer();
-    
+    unawaited(_initializePlayer().then((_) {
+      if (!mounted || _disposing) return;
+      unawaited(_beginEntrySequence());
+    }));
+  }
+
+  /// Countdown starts only after the player can accept play/seek.
+  Future<void> _beginEntrySequence() async {
+    if (_inWidgetTest) {
+      if (!mounted) return;
+      setState(() {
+        _countdown = 0;
+        _ready = true;
+      });
+      return;
+    }
+    await _waitUntilMediaReady();
+    if (!mounted || _disposing) return;
+    _startEntryCountdown();
+  }
+
+  Future<void> _waitUntilMediaReady() async {
+    if (_currentRoutine.sourceType != SourceType.youtube || !_youtubeInitialized) {
+      return;
+    }
+    final deadline = DateTime.now().add(const Duration(seconds: 8));
+    while (mounted && !_disposing && DateTime.now().isBefore(deadline)) {
+      if (_youtubePlayerIsReady(_youtubePlayer.value.playerState)) return;
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+    }
+  }
+
+  bool _youtubePlayerIsReady(PlayerState state) {
+    return state == PlayerState.unStarted ||
+        state == PlayerState.cued ||
+        state == PlayerState.paused ||
+        state == PlayerState.playing ||
+        state == PlayerState.buffering ||
+        state == PlayerState.ended;
+  }
+
+  void _startEntryCountdown() {
+    _countdownTimer?.cancel();
+    _countdown = 3;
+    _ready = false;
+    if (mounted) setState(() {});
     _countdownTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (!mounted) {
+        timer.cancel();
+        return;
+      }
       if (_countdown <= 1) {
         timer.cancel();
         setState(() {
           _countdown = 0;
           _ready = true;
-          _isPlaying = true;
         });
-        _startSegment(0);
+        unawaited(_playInitialSection());
         return;
       }
       setState(() => _countdown -= 1);
     });
   }
 
-  /// Wear / remote channel entry Ã¢â¬â maps onto existing private controls only.
+  /// Countdown finished: seek to section A and call playVideo().
+  /// The play/pause icon updates only from the player listener.
+  Future<void> _playInitialSection() async {
+    if (!mounted || _disposing || _currentRoutine.segments.isEmpty) return;
+    _segmentIndex = 0;
+    _loopsCompleted = 0;
+    _segmentFinished = false;
+    final segment = _currentRoutine.segments.first;
+    final speed = segment.speed <= 0 ? 1.0 : segment.speed;
+    _anchorSectionClock(atSec: segment.startSec);
+    try {
+      switch (_currentRoutine.sourceType) {
+        case SourceType.youtube:
+          if (!_youtubeInitialized) return;
+          await _youtubePlayer.setPlaybackRate(speed);
+          await _youtubePlayer.seekTo(seconds: segment.startSec, allowSeekAhead: true);
+          await _youtubePlayer.playVideo();
+          break;
+        case SourceType.localVideo:
+          await _videoPlayer?.setPlaybackSpeed(speed);
+          await _videoPlayer?.seekTo(
+            Duration(milliseconds: (segment.startSec * 1000).toInt()),
+          );
+          await _videoPlayer?.play();
+          break;
+        case SourceType.audio:
+          await _audioPlayer?.setPlaybackRate(speed);
+          await _audioPlayer?.seek(
+            Duration(milliseconds: (segment.startSec * 1000).toInt()),
+          );
+          await _audioPlayer?.resume();
+          break;
+      }
+    } catch (e) {
+      debugPrint('[LOOPI] initial playVideo failed: $e');
+    }
+    if (!mounted || _disposing) return;
+    _ignoreUntil = DateTime.now().add(const Duration(milliseconds: 500));
+    _armBoundaryPoll();
+  }
+
+  void _anchorSectionClock({double? atSec}) {
+    _sectionAnchorSec = atSec ?? _segment.startSec;
+    _sectionSpeed = _segment.speed <= 0 ? 1.0 : _segment.speed;
+    _sectionWallStart = DateTime.now();
+    _lastReportedSec = _sectionAnchorSec;
+    _lastReportedAt = _sectionWallStart;
+  }
+
+  void _pauseSectionClock() {
+    final estimated = _estimateSectionTime();
+    if (estimated != null) _sectionAnchorSec = estimated;
+    _sectionWallStart = null;
+  }
+
+  double? _estimateSectionTime() {
+    final started = _sectionWallStart;
+    if (started == null) return null;
+    final elapsed = DateTime.now().difference(started).inMilliseconds / 1000.0;
+    if (elapsed < 0) return _sectionAnchorSec;
+    return _sectionAnchorSec + elapsed * _sectionSpeed;
+  }
+
+  /// Wear / remote channel entry — maps onto existing private controls only.
   @override
   Future<void> handleRemoteCommand(PlayerRemoteCommand command) async {
     if (!mounted || _disposing) return;
@@ -182,21 +301,16 @@ class PracticeModeScreenState extends State<PracticeModeScreen>
             startSeconds: _currentRoutine.segments.first.startSec,
           );
           _youtubeInitialized = true;
+          if (mounted) setState(() {});
           _youtubeValueSub = listenYoutubeStream(
             _youtubePlayer.stream,
             (value) {
-              final wasPlaying = _isPlaying;
-              final playing = value.playerState == PlayerState.playing ||
-                  value.playerState == PlayerState.buffering;
-              if (_isPlaying != playing) {
-                setState(() => _isPlaying = playing);
-              }
-              // Cue endSeconds / EOF pause Ã¢â¬â advance while we were playing.
-              if (wasPlaying &&
-                  (value.playerState == PlayerState.ended ||
-                      value.playerState == PlayerState.paused ||
-                      value.playerState == PlayerState.cued)) {
-                unawaited(_checkBoundaryFromPlayerEvent());
+              if (!mounted) return;
+              final state = value.playerState;
+              if (state == PlayerState.playing) {
+                if (!_isPlaying) setState(() => _isPlaying = true);
+              } else if (state == PlayerState.paused) {
+                if (_isPlaying) setState(() => _isPlaying = false);
               }
             },
             isAlive: () => _youtubeAlive,
@@ -328,7 +442,6 @@ class PracticeModeScreenState extends State<PracticeModeScreen>
           _isSeeking = false;
           if (immediate && _youtubeAlive) {
             await _yt(() => _youtubePlayer.playVideo());
-            if (mounted) setState(() => _isPlaying = true);
           }
           break;
         case SourceType.localVideo:
@@ -353,7 +466,6 @@ class PracticeModeScreenState extends State<PracticeModeScreen>
             _isSeeking = false;
             if (immediate) {
               await _videoPlayer!.play();
-              if (mounted) setState(() => _isPlaying = true);
             }
             _videoPlayer!.addListener(_onVideoPlayerUpdate);
             _videoPlayer!.addListener(_onLocalVideoPlayState);
@@ -376,7 +488,6 @@ class PracticeModeScreenState extends State<PracticeModeScreen>
             _isSeeking = false;
             if (immediate) {
               await _audioPlayer!.resume();
-              if (mounted) setState(() => _isPlaying = true);
             }
           }
           break;
@@ -472,9 +583,6 @@ class PracticeModeScreenState extends State<PracticeModeScreen>
     // Keep advancing/seeking locked for the whole prep delay so the boundary
     // poll cannot race ahead and skip Section B's delayTime.
     _ignoreUntil = DateTime.now().add(const Duration(seconds: 30));
-    if (mounted) {
-      setState(() => _isPlaying = false);
-    }
     if (_inWidgetTest) {
       _isSeeking = false;
       _delayPending = false;
@@ -485,37 +593,20 @@ class PracticeModeScreenState extends State<PracticeModeScreen>
       final delaySec = segment.delaySec < 0 ? 0 : segment.delaySec;
       final duration = await _mediaDurationSec();
       final effectiveEnd = _effectiveSectionEnd(segment, duration);
-      final endSeconds = effectiveEnd > segment.startSec ? effectiveEnd : null;
 
       // 1) Seek to section start and hold paused on the first frame.
+      // Do not cueVideoById here — reloading the iframe drops the play gesture
+      // and ignores our end boundary.
       switch (_currentRoutine.sourceType) {
         case SourceType.youtube:
           await _yt(() => _youtubePlayer.pauseVideo());
           await _yt(() => _youtubePlayer.setPlaybackRate(segment.speed));
-          final videoId = resolveYoutubeVideoId(
-            videoId: _currentRoutine.videoId,
-            videoUrl: _currentRoutine.videoUrl,
-          );
-          if (videoId != null && videoId.isNotEmpty) {
-            try {
-              await _yt(
-                () => _youtubePlayer.cueVideoById(
-                  videoId: videoId,
-                  startSeconds: segment.startSec,
-                  endSeconds: endSeconds,
-                ),
-              );
-            } catch (e) {
-              debugPrint('[LOOPI] playback cue ignored: $e');
-            }
-          }
           await _yt(
             () => _youtubePlayer.seekTo(
               seconds: segment.startSec,
               allowSeekAhead: true,
             ),
           );
-          // Cue/seek can auto-resume on web Ã¢â¬â force hold on start frame.
           await _yt(() => _youtubePlayer.pauseVideo());
           break;
         case SourceType.localVideo:
@@ -555,7 +646,7 @@ class PracticeModeScreenState extends State<PracticeModeScreen>
         case SourceType.youtube:
           if (!_youtubeAlive) return;
           await _yt(() => _youtubePlayer.setPlaybackRate(speed));
-          await _yt(() => _youtubePlayer.playVideo());
+          await _youtubePlayer.playVideo();
           break;
         case SourceType.localVideo:
           await _videoPlayer?.setPlaybackSpeed(speed);
@@ -566,7 +657,7 @@ class PracticeModeScreenState extends State<PracticeModeScreen>
           await _audioPlayer?.resume();
           break;
       }
-      if (mounted) setState(() => _isPlaying = true);
+      _anchorSectionClock();
       debugPrint(
         '[LOOPI] playback section ${sectionLabelForIndex(index)} '
         'start=${segment.startSec} end=${segment.endSec} '
@@ -582,31 +673,78 @@ class PracticeModeScreenState extends State<PracticeModeScreen>
     }
   }
 
-  void _armBoundaryPoll() {
+  void _cancelBoundaryPoll() {
+    _pollEpoch++;
+    _pollBusy = false;
     _pollTimer?.cancel();
-    _pollTimer = Timer.periodic(const Duration(milliseconds: 120), (_) async {
-      if (!_ready || _isSeeking || _isAdvancing || _segmentFinished || _disposing) {
+    _pollTimer = null;
+  }
+
+  /// 50ms poll. iframe currentTime lags, so project forward from the last
+  /// sample and pause ~200ms early — the pause command itself arrives late.
+  void _armBoundaryPoll() {
+    _cancelBoundaryPoll();
+    if (_segmentFinished || _disposing || !_ready) return;
+    final epoch = _pollEpoch;
+    _pollTimer = Timer.periodic(const Duration(milliseconds: 50), (timer) {
+      if (_pollBusy || epoch != _pollEpoch) return;
+      if (!_ready || _isSeeking || _isAdvancing || _segmentFinished || _disposing || _delayPending) {
         return;
       }
-      try {
-        final time = await _getCurrentTime();
-        final duration = await _mediaDurationSec();
-        _onTime(time, videoDuration: duration);
-      } catch (e) {
-        debugPrint('[LOOPI] playback poll ignored: $e');
-      }
+      if (!_isPlaying) return;
+      _pollBusy = true;
+      unawaited(() async {
+        try {
+          final reported = await _getCurrentTime();
+          if (epoch != _pollEpoch || _disposing || !_ready || _isSeeking || _isAdvancing || _segmentFinished || _delayPending) {
+            return;
+          }
+          if (_ignoreUntil != null && DateTime.now().isBefore(_ignoreUntil!)) return;
+          final end = _segment.endSec;
+          final time = _projectedPlaybackTime(reported);
+          if (time + 0.001 < end - 0.2) return;
+          timer.cancel();
+          _pollTimer = null;
+          _pollEpoch++;
+          try {
+            if (_currentRoutine.sourceType == SourceType.youtube && _youtubeInitialized) {
+              await _youtubePlayer.pauseVideo();
+            } else if (_currentRoutine.sourceType == SourceType.localVideo) {
+              await _videoPlayer?.pause();
+            } else {
+              await _audioPlayer?.pause();
+            }
+          } catch (e) {
+            debugPrint('[LOOPI] boundary pause ignored: $e');
+          }
+          await _finishSectionAndAdvance();
+        } catch (e) {
+          debugPrint('[LOOPI] playback poll ignored: $e');
+        } finally {
+          if (epoch == _pollEpoch) _pollBusy = false;
+        }
+      }());
     });
   }
 
-  Future<void> _checkBoundaryFromPlayerEvent() async {
-    if (!_ready || _isSeeking || _isAdvancing || _segmentFinished) {
-      return;
+  /// Last iframe sample plus elapsed time, so a stale currentTime cannot run past end.
+  double _projectedPlaybackTime(double reported) {
+    final now = DateTime.now();
+    final speed = _sectionSpeed <= 0 ? 1.0 : _sectionSpeed;
+    if (reported >= _segment.startSec - 0.05) {
+      _lastReportedSec = reported;
+      _lastReportedAt = now;
     }
-    try {
-      final time = await _getCurrentTime();
-      final duration = await _mediaDurationSec();
-      _onTime(time, videoDuration: duration);
-    } catch (_) {}
+    var projected = reported;
+    final sampledAt = _lastReportedAt;
+    if (sampledAt != null) {
+      final age = now.difference(sampledAt).inMilliseconds / 1000.0;
+      final fromSample = _lastReportedSec + age * speed;
+      if (fromSample > projected) projected = fromSample;
+    }
+    final wall = _estimateSectionTime();
+    if (wall != null && wall > projected) projected = wall;
+    return projected;
   }
 
   Future<void> _jumpToSegment(int index) async {
@@ -617,6 +755,7 @@ class PracticeModeScreenState extends State<PracticeModeScreen>
   /// Pauses YouTube / video / audio so background playback cannot leak into
   /// another screen (e.g. Practice Mode).
   Future<void> pausePlayback() async {
+    _cancelBoundaryPoll();
     if (_inWidgetTest) {
       _isPlaying = false;
       return;
@@ -634,25 +773,27 @@ class PracticeModeScreenState extends State<PracticeModeScreen>
           break;
       }
     } catch (_) {}
-    if (mounted) {
-      setState(() => _isPlaying = false);
-    } else {
-      _isPlaying = false;
-    }
+    _pauseSectionClock();
   }
 
   Future<void> _togglePlayPause() async {
     if (_inWidgetTest || !_ready || _playPauseBusy || _disposing) return;
     _playPauseBusy = true;
     try {
-      if (_isPlaying) {
+      // Decide from the iframe, not the icon flag. The icon can lag on first load.
+      final playerState = _currentRoutine.sourceType == SourceType.youtube && _youtubeInitialized
+          ? _youtubePlayer.value.playerState
+          : null;
+      final shouldPause = playerState != null
+          ? playerState == PlayerState.playing || playerState == PlayerState.buffering
+          : _isPlaying;
+      if (shouldPause) {
         await pausePlayback();
-        if (mounted) setState(() => _isPlaying = false);
       } else {
         switch (_currentRoutine.sourceType) {
           case SourceType.youtube:
             if (!_youtubeAlive) return;
-            await _yt(() => _youtubePlayer.playVideo());
+            await _youtubePlayer.playVideo();
             break;
           case SourceType.localVideo:
             if (_videoPlayer == null || _videoPlayer?.value.isInitialized != true) return;
@@ -663,9 +804,12 @@ class PracticeModeScreenState extends State<PracticeModeScreen>
             await _audioPlayer!.resume();
             break;
         }
-        if (mounted) setState(() => _isPlaying = true);
+        final now = await _getCurrentTime();
+        _anchorSectionClock(atSec: now > _segment.startSec ? now : _segment.startSec);
+        _armBoundaryPoll();
       }
-    } catch (_) {
+    } catch (e) {
+      debugPrint('[LOOPI] play/pause ignored: $e');
     } finally {
       _playPauseBusy = false;
     }
@@ -727,7 +871,7 @@ class PracticeModeScreenState extends State<PracticeModeScreen>
     await _startRoutine(next, immediate: true);
   }
 
-  // Single-section playback: at effectiveEnd, pause Ã¢â¬â never auto-advance AÃ¢â âB.
+    // At effectiveEnd, finish this section's loops then advance to the next section.
   void _onTime(double time, {double? videoDuration}) {
     if (!_ready || _delayPending || _isSeeking || _isAdvancing || _segmentFinished) {
       return;
@@ -749,14 +893,15 @@ class PracticeModeScreenState extends State<PracticeModeScreen>
       '${sectionLabelForIndex(_segmentIndex)} time=$time effectiveEnd=$effectiveEnd '
       'rawEnd=${_segment.endSec} duration=$videoDuration',
     );
-    unawaited(_finishSingleSectionPlayback());
+    unawaited(_finishSectionAndAdvance());
   }
 
-  /// Honors loopCount within the current section, then pauses. Never advances.
-  Future<void> _finishSingleSectionPlayback() async {
+  /// Honors loopCount, then seeks into the next section (countdown/delay + play).
+  Future<void> _finishSectionAndAdvance() async {
     if (_isAdvancing || _segmentFinished) return;
     _isAdvancing = true;
     _pollTimer?.cancel();
+    _pauseSectionClock();
     try {
       final delaySec = _segment.delaySec;
       final targetLoops = _segment.loopCount == kInfiniteLoop
@@ -774,14 +919,31 @@ class PracticeModeScreenState extends State<PracticeModeScreen>
         return;
       }
 
+      final nextIndex = _segmentIndex + 1;
+      if (nextIndex < _currentRoutine.segments.length) {
+        debugPrint(
+          '[LOOPI] section complete ${sectionLabelForIndex(_segmentIndex)} '
+          '→ ${sectionLabelForIndex(nextIndex)}',
+        );
+        await pausePlayback();
+        _isAdvancing = false;
+        await _startSegment(nextIndex);
+        return;
+      }
+
+      if (_isGroupPlayback) {
+        _isAdvancing = false;
+        await _advanceToNextRoutine(delaySec);
+        return;
+      }
+
       _segmentFinished = true;
       _pollTimer?.cancel();
       _pollTimer = null;
-      if (mounted) setState(() => _isPlaying = false);
       await pausePlayback();
       debugPrint(
-        '[LOOPI] single-section playback complete '
-        '${sectionLabelForIndex(_segmentIndex)} Ã¢â¬â paused',
+        '[LOOPI] routine playback complete '
+        '${sectionLabelForIndex(_segmentIndex)} — paused',
       );
     } finally {
       _isAdvancing = false;
@@ -836,7 +998,8 @@ class PracticeModeScreenState extends State<PracticeModeScreen>
           await _audioPlayer?.resume();
           break;
       }
-      if (mounted) setState(() => _isPlaying = true);
+      _anchorSectionClock();
+      _armBoundaryPoll();
     } catch (_) {}
   }
 
@@ -1077,8 +1240,8 @@ class PracticeModeScreenState extends State<PracticeModeScreen>
     _disposing = true;
     PlayerRemoteControl.instance.detach(this);
     _ready = false;
+    _cancelBoundaryPoll();
     _countdownTimer?.cancel();
-    _pollTimer?.cancel();
     _delayTimer?.cancel();
     _youtubeValueSub?.cancel();
     _youtubeValueSub = null;
@@ -1118,9 +1281,7 @@ class PracticeModeScreenState extends State<PracticeModeScreen>
       aspectRatio: _playerAspectRatio,
       builder: (context, player) {
         return _buildMainScaffold(
-          mediaWidget: _inWidgetTest
-              ? const ColoredBox(color: Colors.black)
-              : player,
+          mediaWidget: _inWidgetTest ? const ColoredBox(color: Colors.black) : player,
         );
       },
     );
