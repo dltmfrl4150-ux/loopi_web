@@ -4,6 +4,7 @@ import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:youtube_player_iframe/youtube_player_iframe.dart';
 import 'package:easy_localization/easy_localization.dart';
 import 'package:video_player/video_player.dart';
@@ -17,6 +18,8 @@ import '../theme/loopi_colors.dart';
 import '../utils/cached_video.dart';
 import '../utils/time_format.dart';
 import '../utils/media_blob.dart';
+import '../utils/playback_seek_keys.dart';
+import '../utils/routine_play_gate.dart';
 import '../utils/youtube_player_factory.dart';
 import '../widgets/app_logo.dart';
 import '../widgets/favorite_icon_button.dart';
@@ -57,7 +60,12 @@ class PracticeModeScreenState extends State<PracticeModeScreen>
   Timer? _pollTimer;
   Timer? _delayTimer;
   StreamSubscription<YoutubePlayerValue>? _youtubeValueSub;
-  int _countdown = 3;
+  Completer<void>? _delayCompleter;
+  int _delayEpoch = 0;
+  int _countdown = 0;
+  bool _delayCountdownActive = false;
+  bool _userStartInFlight = false;
+  bool _playWhenReady = false;
   bool _ready = false;
   int _segmentIndex = 0;
   int _playlistIndex = 0;
@@ -65,6 +73,16 @@ class PracticeModeScreenState extends State<PracticeModeScreen>
   bool _delayPending = false;
   bool _isPlaying = false;
   bool _isSeeking = false;
+  /// True while Start, playback rate, and playVideo run as one procedure.
+  bool _applyingSection = false;
+  /// True after that procedure has run once. Later plays are resumes.
+  bool _entryApplied = false;
+  bool _holdingNativePlay = false;
+  bool _rateFixInFlight = false;
+  Stopwatch? _playDiagWatch;
+  bool _playDiagSawPlaying = false;
+  bool _playDiagSawPosition = false;
+  double? _playDiagFirstPosition;
   bool _segmentFinished = false;
   bool _pollBusy = false;
   int _pollEpoch = 0;
@@ -128,75 +146,140 @@ class PracticeModeScreenState extends State<PracticeModeScreen>
     _loopsCompleted = 0;
     _segmentFinished = false;
     _isPlaying = false;
+    HardwareKeyboard.instance.addHandler(_handlePlaybackSeekKey);
 
-    unawaited(_initializePlayer().then((_) {
-      if (!mounted || _disposing) return;
-      unawaited(_beginEntrySequence());
-    }));
-  }
-
-  /// Countdown starts only after the player can accept play/seek.
-  Future<void> _beginEntrySequence() async {
     if (_inWidgetTest) {
-      if (!mounted) return;
-      setState(() {
-        _countdown = 0;
-        _ready = true;
-      });
+      _ready = true;
       return;
     }
-    await _waitUntilMediaReady();
+    unawaited(_initializePlayer());
+  }
+
+  void _markControlsReady() {
     if (!mounted || _disposing) return;
-    _startEntryCountdown();
+    if (!_ready) setState(() => _ready = true);
+    if (!_playWhenReady || _entryApplied || _userStartInFlight) return;
+    _playWhenReady = false;
+    unawaited(_startPlaybackFromUser());
   }
 
-  Future<void> _waitUntilMediaReady() async {
-    if (_currentRoutine.sourceType != SourceType.youtube || !_youtubeInitialized) {
+  void _beginPlayDiag() {
+    _playDiagWatch = Stopwatch()..start();
+    _playDiagSawPlaying = false;
+    _playDiagSawPosition = false;
+    _playDiagFirstPosition = null;
+    _logPlayDiag('play_button');
+  }
+
+  void _logPlayDiag(String event, {String extra = ''}) {
+    if (!kDebugMode) return;
+    final elapsed = _playDiagWatch?.elapsedMilliseconds ?? -1;
+    debugPrint('[PLAY_DIAG] event=$event elapsed_ms=$elapsed$extra');
+  }
+
+  String _youtubeStateLabel() {
+    if (!_youtubeInitialized) return 'none';
+    return _youtubePlayer.value.playerState.name;
+  }
+
+  void _notePlayDiagPosition(double seconds) {
+    if (!kDebugMode || _playDiagWatch == null || _playDiagSawPosition) return;
+    final first = _playDiagFirstPosition;
+    if (first == null) {
+      _playDiagFirstPosition = seconds;
       return;
     }
-    final deadline = DateTime.now().add(const Duration(seconds: 8));
-    while (mounted && !_disposing && DateTime.now().isBefore(deadline)) {
-      if (_youtubePlayerIsReady(_youtubePlayer.value.playerState)) return;
-      await Future<void>.delayed(const Duration(milliseconds: 100));
+    if (seconds > first + 0.05) {
+      _playDiagSawPosition = true;
+      _logPlayDiag('position_advanced', extra: ' from=$first to=$seconds');
     }
   }
 
-  bool _youtubePlayerIsReady(PlayerState state) {
-    return state == PlayerState.unStarted ||
-        state == PlayerState.cued ||
-        state == PlayerState.paused ||
-        state == PlayerState.playing ||
-        state == PlayerState.buffering ||
-        state == PlayerState.ended;
-  }
-
-  void _startEntryCountdown() {
+  /// Counts the section's saved delay, then returns. Does not play.
+  Future<void> _runVisibleDelay(int seconds) async {
+    if (seconds <= 0 || _inWidgetTest) return;
     _countdownTimer?.cancel();
-    _countdown = 3;
-    _ready = false;
+    final epoch = ++_delayEpoch;
+    final completer = Completer<void>();
+    _delayCompleter = completer;
+    _delayCountdownActive = true;
+    _countdown = seconds;
     if (mounted) setState(() {});
     _countdownTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
-      if (!mounted) {
+      if (epoch != _delayEpoch) {
         timer.cancel();
+        return;
+      }
+      if (!mounted || _disposing) {
+        timer.cancel();
+        _finishDelayWait(epoch);
         return;
       }
       if (_countdown <= 1) {
         timer.cancel();
-        setState(() {
-          _countdown = 0;
-          _ready = true;
-        });
-        unawaited(_playInitialSection());
+        _countdown = 0;
+        _delayCountdownActive = false;
+        if (mounted) setState(() {});
+        _finishDelayWait(epoch);
         return;
       }
       setState(() => _countdown -= 1);
     });
+    await completer.future;
   }
 
-  /// Countdown finished: seek to section A and call playVideo().
+  void _finishDelayWait(int epoch) {
+    if (epoch != _delayEpoch) return;
+    _delayCountdownActive = false;
+    final pending = _delayCompleter;
+    _delayCompleter = null;
+    if (pending != null && !pending.isCompleted) pending.complete();
+  }
+
+  void _cancelDelayCountdown() {
+    _delayEpoch++;
+    _countdownTimer?.cancel();
+    _countdownTimer = null;
+    _countdown = 0;
+    _delayCountdownActive = false;
+    final pending = _delayCompleter;
+    _delayCompleter = null;
+    if (pending != null && !pending.isCompleted) pending.complete();
+  }
+
+  /// Play button: wait for this section's delaySec, then start the routine once.
+  Future<void> _startPlaybackFromUser() async {
+    if (_userStartInFlight || _delayCountdownActive || _applyingSection || _entryApplied || _disposing) {
+      return;
+    }
+    _userStartInFlight = true;
+    try {
+      final delay = _currentRoutine.segments.isEmpty
+          ? 0
+          : sectionPlaybackDelaySeconds(_currentRoutine.segments.first.delaySec);
+      _logPlayDiag('routine_start');
+      _logPlayDiag('delay_checked', extra: ' delay_sec=$delay');
+      await _runVisibleDelay(delay);
+      if (!mounted || _disposing || _entryApplied) return;
+      await _playInitialSection();
+    } finally {
+      _userStartInFlight = false;
+    }
+  }
+
+  /// Countdown finished: seek to section start, play, then apply the rate.
   /// The play/pause icon updates only from the player listener.
   Future<void> _playInitialSection() async {
-    if (!mounted || _disposing || _currentRoutine.segments.isEmpty) return;
+    if (_applyingSection || !mounted || _disposing || _currentRoutine.segments.isEmpty) {
+      return;
+    }
+    final stateName = _youtubeStateLabel();
+    _logPlayDiag('player_ready_wait_start', extra: ' state=$stateName budget_ms=${kYoutubeStatePollBudget.inMilliseconds}');
+    _logPlayDiag('player_ready_wait_end', extra: ' state=$stateName');
+    if (_applyingSection || !mounted || _disposing || _currentRoutine.segments.isEmpty) {
+      return;
+    }
+    _applyingSection = true;
     _segmentIndex = 0;
     _loopsCompleted = 0;
     _segmentFinished = false;
@@ -207,9 +290,14 @@ class PracticeModeScreenState extends State<PracticeModeScreen>
       switch (_currentRoutine.sourceType) {
         case SourceType.youtube:
           if (!_youtubeInitialized) return;
-          await _youtubePlayer.setPlaybackRate(speed);
+          _logPlayDiag('seek_start', extra: ' start_sec=${segment.startSec}');
           await _youtubePlayer.seekTo(seconds: segment.startSec, allowSeekAhead: true);
+          _logPlayDiag('seek_end');
+          _logPlayDiag('play_command');
           await _youtubePlayer.playVideo();
+          _logPlayDiag('rate_start', extra: ' speed=$speed');
+          await _applyVerifiedYoutubeRate(speed);
+          _logPlayDiag('rate_end');
           break;
         case SourceType.localVideo:
           await _videoPlayer?.setPlaybackSpeed(speed);
@@ -226,12 +314,142 @@ class PracticeModeScreenState extends State<PracticeModeScreen>
           await _audioPlayer?.resume();
           break;
       }
+      _entryApplied = true;
+      if (mounted && _playerReportsPlaying) {
+        setState(() => _isPlaying = true);
+      }
+      _logPlayDiag('routine_state_updated', extra: ' playing=$_isPlaying');
     } catch (e) {
       debugPrint('[LOOPI] initial playVideo failed: $e');
+    } finally {
+      _applyingSection = false;
     }
-    if (!mounted || _disposing) return;
+    if (!mounted || _disposing || !_entryApplied) return;
     _ignoreUntil = DateTime.now().add(const Duration(milliseconds: 500));
     _armBoundaryPoll();
+  }
+
+  bool get _playerReportsPlaying {
+    switch (_currentRoutine.sourceType) {
+      case SourceType.youtube:
+        if (!_youtubeInitialized) return false;
+        final state = _youtubePlayer.value.playerState;
+        return state == PlayerState.playing || state == PlayerState.buffering;
+      case SourceType.localVideo:
+        return _videoPlayer?.value.isPlaying ?? false;
+      case SourceType.audio:
+        return true;
+    }
+  }
+
+  /// Applies [speed] and reads the player back. YouTube only accepts a fixed
+  /// rate list, so a routine speed such as 0.8 becomes the nearest supported rate.
+  Future<void> _applyVerifiedYoutubeRate(double speed) async {
+    if (!_youtubeAlive) return;
+    final target = nearestYoutubePlaybackRate(speed);
+    try {
+      await _youtubePlayer.setPlaybackRate(target);
+      final applied = await _youtubePlayer.playbackRate
+          .timeout(const Duration(milliseconds: 800), onTimeout: () => target);
+      if (!applied.isFinite || (applied - target).abs() > 0.08) {
+        await _youtubePlayer.setPlaybackRate(target);
+      }
+    } catch (e) {
+      debugPrint('[LOOPI] playback rate ignored: $e');
+    }
+  }
+
+  Future<void> _resumeSectionPlayback() async {
+    if (_applyingSection || !mounted || _disposing) return;
+    _applyingSection = true;
+    try {
+      switch (_currentRoutine.sourceType) {
+        case SourceType.youtube:
+          if (!_youtubeAlive) return;
+          _logPlayDiag('play_command');
+          await _youtubePlayer.playVideo();
+          _logPlayDiag('rate_start');
+          await _applyVerifiedYoutubeRate(_segment.speed <= 0 ? 1.0 : _segment.speed);
+          _logPlayDiag('rate_end');
+          break;
+        case SourceType.localVideo:
+          await _videoPlayer?.play();
+          break;
+        case SourceType.audio:
+          await _audioPlayer?.resume();
+          break;
+      }
+      if (mounted && _playerReportsPlaying) {
+        setState(() => _isPlaying = true);
+      }
+      _logPlayDiag('routine_state_updated', extra: ' playing=$_isPlaying');
+      final now = await _getCurrentTime();
+      _notePlayDiagPosition(now);
+      _anchorSectionClock(atSec: now > _segment.startSec ? now : _segment.startSec);
+      _armBoundaryPoll();
+    } catch (e) {
+      debugPrint('[LOOPI] play/pause ignored: $e');
+    } finally {
+      _applyingSection = false;
+    }
+  }
+
+  void _onYoutubePlayerValue(YoutubePlayerValue value) {
+    if (!mounted || _disposing) return;
+    final state = value.playerState;
+    if (state == PlayerState.playing) {
+      if (!_playDiagSawPlaying) {
+        _playDiagSawPlaying = true;
+        _logPlayDiag('player_playing', extra: ' state=${state.name}');
+      }
+      final decision = decideIframePlaying(
+        entryApplied: _entryApplied,
+        applyingSection: _applyingSection,
+        holdingForDelay: _delayCountdownActive,
+      );
+      switch (decision.action) {
+        case IframePlayingAction.pauseUntilReady:
+          if (_holdingNativePlay) return;
+          _holdingNativePlay = true;
+          unawaited(() async {
+            try {
+              if (_youtubeInitialized) await _youtubePlayer.pauseVideo();
+            } catch (e) {
+              debugPrint('[LOOPI] hold play during countdown ignored: $e');
+            } finally {
+              _holdingNativePlay = false;
+            }
+          }());
+          return;
+        case IframePlayingAction.ignore:
+          return;
+        case IframePlayingAction.syncPlayback:
+          if (!_isPlaying) setState(() => _isPlaying = true);
+          _ensureYoutubeRateWhilePlaying(value.playbackRate);
+          if (_pollTimer == null) _armBoundaryPoll();
+          return;
+      }
+    }
+    if (state == PlayerState.paused || state == PlayerState.ended) {
+      if (ignoreIframePause(applyingSection: _applyingSection)) return;
+      if (_isPlaying) setState(() => _isPlaying = false);
+    }
+  }
+
+  void _ensureYoutubeRateWhilePlaying(double reportedRate) {
+    if (!_entryApplied || _rateFixInFlight || !_youtubeAlive) return;
+    final target = nearestYoutubePlaybackRate(_segment.speed <= 0 ? 1.0 : _segment.speed);
+    if ((reportedRate - target).abs() <= 0.08) return;
+    _rateFixInFlight = true;
+    unawaited(() async {
+      try {
+        await _applyVerifiedYoutubeRate(target);
+      } catch (e) {
+        debugPrint('[LOOPI] playback rate reapply ignored: $e');
+      } finally {
+        _rateFixInFlight = false;
+      }
+    }());
   }
 
   void _anchorSectionClock({double? atSec}) {
@@ -303,15 +521,7 @@ class PracticeModeScreenState extends State<PracticeModeScreen>
           if (mounted) setState(() {});
           _youtubeValueSub = listenYoutubeStream(
             _youtubePlayer.stream,
-            (value) {
-              if (!mounted) return;
-              final state = value.playerState;
-              if (state == PlayerState.playing) {
-                if (!_isPlaying) setState(() => _isPlaying = true);
-              } else if (state == PlayerState.paused) {
-                if (_isPlaying) setState(() => _isPlaying = false);
-              }
-            },
+            _onYoutubePlayerValue,
             isAlive: () => _youtubeAlive,
           );
           // Do NOT subscribe to videoStateStream Ã¢â¬â float time payloads crash
@@ -366,7 +576,7 @@ class PracticeModeScreenState extends State<PracticeModeScreen>
               );
             });
             _audioPlayer!.onPlayerStateChanged.listen((state) {
-              if (!mounted) return;
+              if (!mounted || _applyingSection) return;
               final playing = '$state'.contains('playing');
               if (_isPlaying != playing) {
                 setState(() => _isPlaying = playing);
@@ -378,11 +588,10 @@ class PracticeModeScreenState extends State<PracticeModeScreen>
     } catch (error) {
       // Log error but don't crash the app
       print('Player initialization error: $error');
-      // Ensure loading state is cleared even on error
-      if (mounted) {
-        setState(() => _ready = true);
-      }
+      _markControlsReady();
+      return;
     }
+    _markControlsReady();
   }
 
   void _onVideoPlayerUpdate() {
@@ -398,7 +607,7 @@ class PracticeModeScreenState extends State<PracticeModeScreen>
   }
 
   void _onLocalVideoPlayState() {
-    if (!mounted || _videoPlayer == null) return;
+    if (!mounted || _videoPlayer == null || _applyingSection) return;
     final playing = _videoPlayer!.value.isPlaying;
     if (_isPlaying != playing) {
       setState(() => _isPlaying = playing);
@@ -633,7 +842,7 @@ class PracticeModeScreenState extends State<PracticeModeScreen>
           '${sectionLabelForIndex(index)} play',
         );
         _ignoreUntil = DateTime.now().add(Duration(seconds: delaySec + 1));
-        await Future<void>.delayed(Duration(seconds: delaySec));
+        await _runVisibleDelay(delaySec);
       } else {
         await Future<void>.delayed(const Duration(milliseconds: 120));
       }
@@ -695,6 +904,7 @@ class PracticeModeScreenState extends State<PracticeModeScreen>
       unawaited(() async {
         try {
           final reported = await _getCurrentTime();
+          _notePlayDiagPosition(reported);
           if (epoch != _pollEpoch || _disposing || !_ready || _isSeeking || _isAdvancing || _segmentFinished || _delayPending) {
             return;
           }
@@ -777,31 +987,100 @@ class PracticeModeScreenState extends State<PracticeModeScreen>
   }
 
   Future<void> _togglePlayPause() async {
-    if (_inWidgetTest || !_ready || _disposing) return;
+    if (_inWidgetTest || _disposing || _applyingSection || _delayCountdownActive || _userStartInFlight) {
+      return;
+    }
+    if (!_ready) {
+      if (!_isPlaying && !_entryApplied) {
+        _beginPlayDiag();
+        _logPlayDiag('play_button_before_player_init');
+        _playWhenReady = true;
+      }
+      return;
+    }
     try {
       if (_isPlaying) {
         setState(() => _isPlaying = false);
         await pausePlayback();
-      } else {
-        setState(() => _isPlaying = true);
-        switch (_currentRoutine.sourceType) {
-          case SourceType.youtube:
-            if (_youtubeAlive) await _youtubePlayer.playVideo();
-            break;
-          case SourceType.localVideo:
-            await _videoPlayer?.play();
-            break;
-          case SourceType.audio:
-            await _audioPlayer?.resume();
-            break;
-        }
-        final now = await _getCurrentTime();
-        _anchorSectionClock(atSec: now > _segment.startSec ? now : _segment.startSec);
-        _armBoundaryPoll();
+        return;
       }
+      _beginPlayDiag();
+      if (!_entryApplied) {
+        await _startPlaybackFromUser();
+        return;
+      }
+      await _resumeSectionPlayback();
     } catch (e) {
       debugPrint('[LOOPI] play/pause ignored: $e');
     }
+  }
+
+  bool _handlePlaybackSeekKey(KeyEvent event) {
+    if (!mounted || _disposing || !_ready) return false;
+    final route = ModalRoute.of(context);
+    if (route != null && !route.isCurrent) return false;
+    final result = playbackSeekKeyResult(
+      event: event,
+      routeIsCurrent: true,
+      textInputFocused: _primaryFocusIsTextInput(),
+    );
+    final delta = result.delta;
+    if (delta != null) {
+      unawaited(_seekRelative(delta));
+    }
+    return result.handled;
+  }
+
+  bool _primaryFocusIsTextInput() {
+    final focusContext = FocusManager.instance.primaryFocus?.context;
+    if (focusContext == null) return false;
+    return focusContext.widget is EditableText ||
+        focusContext.findAncestorWidgetOfExactType<EditableText>() != null;
+  }
+
+  /// Left/right double-tap zones over the picture.
+  ///
+  /// The center and the bottom strip stay open so a YouTube iframe can still
+  /// receive its own single taps. Cross-origin iframe events never reach Flutter.
+  Widget _fiveSecondSeekOverlay() {
+    if (_inWidgetTest) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 56),
+      child: Row(
+        children: [
+          Expanded(child: _seekDoubleTapZone(-5)),
+          const SizedBox(width: 72),
+          Expanded(child: _seekDoubleTapZone(5)),
+        ],
+      ),
+    );
+  }
+
+  Widget _seekDoubleTapZone(double deltaSeconds) {
+    return PointerInterceptor(
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onDoubleTap: () {
+          if (!_ready || _disposing) return;
+          unawaited(_seekRelative(deltaSeconds));
+        },
+        child: const SizedBox.expand(),
+      ),
+    );
+  }
+
+  Widget _flippedMedia(Widget mediaWidget) {
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        Transform.flip(
+          flipX: _currentRoutine.isMirroredOn &&
+              _currentRoutine.sourceType != SourceType.audio,
+          child: mediaWidget,
+        ),
+        _fiveSecondSeekOverlay(),
+      ],
+    );
   }
 
   Future<void> _seekRelative(double seconds) async {
@@ -1058,7 +1337,7 @@ class PracticeModeScreenState extends State<PracticeModeScreen>
           break;
       }
       // Ã¢ÅÂ¨ Ã¬â¹Â¤Ã¬Â§ËÃ¬Â ÂÃ¬ÅÂ¼Ã«Â¡Å Ã«âÅÃ«Â ËÃ¬ÂÂ´ Ã¬Â´ËÃ«Â§ÅÃ­ÂÂ¼ Ã«Åâ¬ÃªÂ¸Â°Ã­â¢ËÃ«Å â Ã¬Â½âÃ«âÅÃªÂ°â¬ Ã«Â¹Â Ã¬Â Â¸ Ã¬Å¾ËÃ¬âËÃ¬Å ÂµÃ«â¹ËÃ«â¹Â¤!
-      await Future.delayed(Duration(seconds: delaySec));
+      await _runVisibleDelay(delaySec);
       if (!_youtubeAlive && _currentRoutine.sourceType == SourceType.youtube) {
         return;
       }
@@ -1227,10 +1506,11 @@ class PracticeModeScreenState extends State<PracticeModeScreen>
   @override
   void dispose() {
     _disposing = true;
+    HardwareKeyboard.instance.removeHandler(_handlePlaybackSeekKey);
     PlayerRemoteControl.instance.detach(this);
     _ready = false;
+    _cancelDelayCountdown();
     _cancelBoundaryPoll();
-    _countdownTimer?.cancel();
     _delayTimer?.cancel();
     _youtubeValueSub?.cancel();
     _youtubeValueSub = null;
@@ -1441,17 +1721,23 @@ class PracticeModeScreenState extends State<PracticeModeScreen>
     return Center(
       child: AspectRatio(
         aspectRatio: _playerAspectRatio > 0 ? _playerAspectRatio : 16 / 9,
-        child: Transform.flip(
-          flipX: _currentRoutine.isMirroredOn &&
-              _currentRoutine.sourceType != SourceType.audio,
-          child: mediaWidget,
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            Transform.flip(
+              flipX: _currentRoutine.isMirroredOn &&
+                  _currentRoutine.sourceType != SourceType.audio,
+              child: mediaWidget,
+            ),
+            _fiveSecondSeekOverlay(),
+          ],
         ),
       ),
     );
   }
 
   Widget _countdownBanner({bool compact = false}) {
-    if (_ready) return const SizedBox.shrink();
+    if (_countdown <= 0) return const SizedBox.shrink();
     return Padding(
       padding: EdgeInsets.fromLTRB(compact ? 8 : 16, compact ? 4 : 8, compact ? 8 : 16, 0),
       child: Material(
@@ -1462,32 +1748,17 @@ class PracticeModeScreenState extends State<PracticeModeScreen>
             vertical: compact ? 6 : 12,
             horizontal: compact ? 10 : 16,
           ),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(
-                'player.get_ready'.tr(),
-                style: TextStyle(
-                  color: Colors.white,
-                  fontSize: compact ? 12 : 16,
-                  fontWeight: FontWeight.w700,
-                ),
+          child: CircleAvatar(
+            radius: compact ? 14 : 20,
+            backgroundColor: LoopiColors.purple,
+            child: Text(
+              '$_countdown',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: compact ? 13 : 18,
+                fontWeight: FontWeight.w800,
               ),
-              SizedBox(width: compact ? 8 : 12),
-              CircleAvatar(
-                radius: compact ? 12 : 18,
-                backgroundColor: LoopiColors.purple,
-                child: Text(
-                  '$_countdown',
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontSize: compact ? 12 : 16,
-                    fontWeight: FontWeight.w800,
-                  ),
-                ),
-              ),
-            ],
+            ),
           ),
         ),
       ),
@@ -1520,11 +1791,7 @@ class PracticeModeScreenState extends State<PracticeModeScreen>
                   ),
                   child: AspectRatio(
                     aspectRatio: _playerAspectRatio,
-                    child: Transform.flip(
-                      flipX: _currentRoutine.isMirroredOn &&
-                          _currentRoutine.sourceType != SourceType.audio,
-                      child: mediaWidget,
-                    ),
+                    child: _flippedMedia(mediaWidget),
                   ),
                 ),
               ),
@@ -1569,7 +1836,7 @@ class PracticeModeScreenState extends State<PracticeModeScreen>
             fit: StackFit.expand,
             children: [
               Positioned.fill(child: _mediaStage(mediaWidget)),
-              if (!_ready)
+              if (_countdown > 0)
                 Align(
                   alignment: Alignment.topCenter,
                   child: _countdownBanner(compact: true),

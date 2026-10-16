@@ -2,6 +2,7 @@ import 'package:easy_localization/easy_localization.dart';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 
+import '../account/account_policy.dart';
 import '../services/auth_service.dart';
 import '../services/database_service.dart';
 import '../services/storage_service.dart';
@@ -24,12 +25,14 @@ class MyProfileScreen extends StatefulWidget {
     required this.userState,
     required this.library,
     this.onSignedOut,
+    this.onDeletionRequested,
     this.onOpenUserFeed,
   });
 
   final UserSubscriptionState userState;
   final RoutineLibrary library;
   final Future<void> Function()? onSignedOut;
+  final Future<void> Function()? onDeletionRequested;
   final void Function(String authorId, String authorName)? onOpenUserFeed;
 
   @override
@@ -348,11 +351,37 @@ class _MyProfileScreenState extends State<MyProfileScreen> {
   }
 
   Future<void> _confirmWithdraw() async {
-    final confirmed = await showDialog<bool>(
+    final uid = _userState.uid;
+    if (uid == null || uid.isEmpty) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('profile.delete_account_no_server'.tr())),
+      );
+      return;
+    }
+    final explained = await showDialog<bool>(
       context: context,
       builder: (dialogContext) => AlertDialog(
         title: Text('profile.delete_account_title'.tr()),
-        content: Text('profile.delete_account_body'.tr()),
+        content: SingleChildScrollView(
+          child: Text('profile.delete_account_body'.tr()),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(dialogContext, false), child: Text('common.cancel'.tr())),
+          TextButton(onPressed: () => Navigator.pop(dialogContext, true), child: Text('common.confirm'.tr())),
+        ],
+      ),
+    );
+    if (explained != true || !mounted) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text('profile.delete_account_confirm_title'.tr()),
+        content: Text(
+          _userState.isGuest
+              ? 'profile.delete_account_guest_warning'.tr()
+              : 'profile.delete_account_confirm_body'.tr(),
+        ),
         actions: [
           TextButton(onPressed: () => Navigator.pop(dialogContext, false), child: Text('common.cancel'.tr())),
           TextButton(
@@ -363,9 +392,31 @@ class _MyProfileScreenState extends State<MyProfileScreen> {
         ],
       ),
     );
-    if (confirmed == true && mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('profile.delete_account_done'.tr())));
+    if (confirmed != true || !mounted) return;
+    final decision = await _database.requestAccountDeletion(uid);
+    if (!mounted) return;
+    if (decision == DeletionRequestDecision.purgeStarted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('profile.delete_account_purge_started'.tr())),
+      );
+      return;
     }
+    if (decision != DeletionRequestDecision.create && decision != DeletionRequestDecision.alreadyPending) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('profile.delete_account_failed'.tr())),
+      );
+      return;
+    }
+    await widget.library.discardLocalAccountData(uid);
+    if (!mounted) return;
+    if (widget.onDeletionRequested != null) {
+      Navigator.of(context).popUntil((route) => route.isFirst);
+      await widget.onDeletionRequested!();
+      return;
+    }
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('profile.delete_account_done'.tr())),
+    );
   }
 
   Widget _infoRow(String label, String value) {

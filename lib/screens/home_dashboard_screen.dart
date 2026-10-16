@@ -69,11 +69,13 @@ class HomeDashboardScreen extends StatefulWidget {
     required this.library,
     required this.userState,
     this.onSignedOut,
+    this.onDeletionRequested,
   });
 
   final RoutineLibrary library;
   final UserSubscriptionState userState;
   final Future<void> Function()? onSignedOut;
+  final Future<void> Function()? onDeletionRequested;
 
   @override
   State<HomeDashboardScreen> createState() => _HomeDashboardScreenState();
@@ -230,6 +232,7 @@ class _HomeDashboardScreenState extends State<HomeDashboardScreen> {
           library: widget.library,
           sourceType: sourceType,
           file: file,
+          onGuestSignUp: widget.onSignedOut,
         ),
       ),
     );
@@ -245,6 +248,7 @@ class _HomeDashboardScreenState extends State<HomeDashboardScreen> {
           sourceType: routine.sourceType,
           localFilePath: routine.localFilePath,
           fileName: routine.fileName,
+          onGuestSignUp: widget.onSignedOut,
         ),
       ),
     );
@@ -382,6 +386,7 @@ class _HomeDashboardScreenState extends State<HomeDashboardScreen> {
                   userState: widget.userState,
                   library: widget.library,
                   onSignedOut: widget.onSignedOut,
+                  onDeletionRequested: widget.onDeletionRequested,
                   onOpenUserFeed: (authorId, authorName) {
                     Navigator.of(context).pop();
                     _openUserFeed(authorId, authorName);
@@ -414,6 +419,7 @@ class _HomeDashboardScreenState extends State<HomeDashboardScreen> {
               library: widget.library,
               embedded: true,
               active: _tabIndex == 1,
+              onGuestSignUp: widget.onSignedOut,
             ),
             CommunityScreen(
               library: widget.library,

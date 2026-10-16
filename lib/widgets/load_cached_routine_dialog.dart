@@ -1,13 +1,14 @@
 import 'package:flutter/material.dart';
 
 import '../theme/loopi_colors.dart';
+import 'youtube_safe_dialog.dart';
 
 /// Asks whether to reuse Firestore-cached practice sections for a YouTube video.
 ///
 /// Returns `true` to load the cached routine, `false` to start fresh,
 /// or `null` if the dialog was dismissed.
 Future<bool?> showLoadCachedRoutineDialog(BuildContext context) {
-  return showDialog<bool>(
+  return showYoutubeSafeDialog<bool>(
     context: context,
     barrierDismissible: true,
     builder: (dialogContext) {

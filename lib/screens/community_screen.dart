@@ -377,8 +377,8 @@ class CommunityScreenState extends State<CommunityScreen> with SingleTickerProvi
           tabAlignment: TabAlignment.start,
           tabs: [
             Tab(text: 'community.tab_routines'.tr()),
-            Tab(text: 'community.tab_classes'.tr()),
             Tab(text: 'community.tab_showcase'.tr()),
+            Tab(text: 'community.tab_classes'.tr()),
           ],
         ),
         Expanded(
@@ -400,16 +400,6 @@ class CommunityScreenState extends State<CommunityScreen> with SingleTickerProvi
                   authorName: post.authorName,
                 ),
               ),
-              _ClassesTab(
-                category: _category,
-                onOpen: (course) {
-                  Navigator.of(context).push(
-                    MaterialPageRoute<void>(
-                      builder: (_) => ClassDetailScreen(course: course),
-                    ),
-                  );
-                },
-              ),
               _ShowcaseTab(
                 loading: _showcaseLoading,
                 loadingMore: _showcaseLoadingMore,
@@ -425,6 +415,16 @@ class CommunityScreenState extends State<CommunityScreen> with SingleTickerProvi
                   authorName: item.authorName,
                 ),
                 onPlay: _openShowcasePlayer,
+              ),
+              _ClassesTab(
+                category: _category,
+                onOpen: (course) {
+                  Navigator.of(context).push(
+                    MaterialPageRoute<void>(
+                      builder: (_) => ClassDetailScreen(course: course),
+                    ),
+                  );
+                },
               ),
             ],
           ),

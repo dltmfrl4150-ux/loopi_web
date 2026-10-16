@@ -86,7 +86,28 @@ class StorageService {
     return audio ? (ext: 'm4a', mime: 'audio/mp4') : (ext: 'mp4', mime: 'video/mp4');
   }
 
-  static Future<String?> uploadPracticeRecording({
+  static Future<bool> deleteOwnedObject({
+    required String userId,
+    required String objectPath,
+  }) async {
+    if (!_ready || userId.isEmpty) return false;
+    final owned = objectPath.startsWith('showcase/$userId/') ||
+        objectPath.startsWith('avatars/$userId/');
+    if (!owned || objectPath.contains('..')) return false;
+    try {
+      await FirebaseStorage.instance.ref(objectPath).delete();
+      return true;
+    } on FirebaseException catch (error) {
+      if (error.code == 'object-not-found') return true;
+      debugPrint('StorageService.deleteOwnedObject error: $error');
+      return false;
+    } catch (error) {
+      debugPrint('StorageService.deleteOwnedObject error: $error');
+      return false;
+    }
+  }
+
+  static Future<({String url, String? storagePath})?> uploadPracticeRecording({
     required String userId,
     required String resultId,
     String? path,
@@ -94,7 +115,7 @@ class StorageService {
     bool audio = false,
   }) async {
     if (path != null && _isRemoteHttp(path.trim())) {
-      return path.trim();
+      return (url: path.trim(), storagePath: null);
     }
     final data = await readMediaBytes(path: path, bytes: bytes);
     if (data == null || data.isEmpty) {
@@ -118,10 +139,11 @@ class StorageService {
       final ref = FirebaseStorage.instance.ref('showcase/$userId/$resultId.${type.ext}');
       await ref.putData(data, SettableMetadata(contentType: type.mime));
       final url = await ref.getDownloadURL();
+      final storagePath = 'showcase/$userId/$resultId.${type.ext}';
       debugPrint(
-        '[LOOPI] uploadPracticeRecording ok user=$userId result=$resultId mime=${type.mime} bytes=${data.lengthInBytes} url=$url',
+        '[LOOPI] uploadPracticeRecording ok user=$userId result=$resultId mime=${type.mime} bytes=${data.lengthInBytes} path=$storagePath',
       );
-      return url;
+      return (url: url, storagePath: storagePath);
     } catch (error) {
       debugPrint('StorageService.uploadPracticeRecording error: $error');
       return null;

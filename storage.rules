@@ -25,14 +25,28 @@ service firebase.storage {
         && request.resource.size < 200 * 1024;
     }
 
+    function accountAllowsPublicWrite(userId) {
+      let path = /databases/(default)/documents/users/$(userId)/private/account;
+      return firestore.exists(path)
+        && firestore.get(path).data.ageDeclaration == 'at_least_14'
+        && firestore.get(path).data.status == 'active';
+    }
+
     match /showcase/{userId}/{allPaths=**} {
       allow read: if true;
-      allow write: if isOwner(userId) && underSizeLimit() && isAllowedMedia();
+      allow create, update: if isOwner(userId)
+        && accountAllowsPublicWrite(userId)
+        && underSizeLimit()
+        && isAllowedMedia();
+      allow delete: if isOwner(userId) && accountAllowsPublicWrite(userId);
     }
 
     match /avatars/{userId}/{allPaths=**} {
       allow read: if true;
-      allow write: if isOwner(userId) && isAvatarImage();
+      allow create, update: if isOwner(userId)
+        && accountAllowsPublicWrite(userId)
+        && isAvatarImage();
+      allow delete: if isOwner(userId) && accountAllowsPublicWrite(userId);
     }
   }
 }

@@ -9,6 +9,12 @@ service cloud.firestore {
       return isSignedIn() && request.auth.uid == uid;
     }
 
+    // Firebase Auth ID tokens always include this claim. Anonymous is "anonymous".
+    function isRegisteredOwner(uid) {
+      return isOwner(uid)
+        && request.auth.token.firebase.sign_in_provider != 'anonymous';
+    }
+
     function communitySocialKeys() {
       return ['likedBy', 'likesCount', 'favoritedBy', 'favoriteCount', 'trendingFavorites7d'];
     }
@@ -22,28 +28,177 @@ service cloud.firestore {
       return isSignedIn() && resource.data.authorId == request.auth.uid;
     }
 
+    function nicknameOk(data) {
+      return data.keys().hasAll(['nickname'])
+        && data.nickname is string
+        && data.nickname.size() > 0
+        && data.nickname.size() <= 80;
+    }
+
+    function photoOk(data) {
+      return !data.keys().hasAny(['photoUrl'])
+        || (data.photoUrl is string
+            && data.photoUrl.size() > 0
+            && data.photoUrl.size() <= 4096);
+    }
+
+    function privateAccountPath(uid) {
+      return /databases/$(database)/documents/users/$(uid)/private/account;
+    }
+
+    // Publishing stays closed until the signed-in user has declared they are
+    // 14 or older and the account is not waiting for deletion.
+    function accountAllowsPublicWrite() {
+      let path = privateAccountPath(request.auth.uid);
+      return isSignedIn()
+        && exists(path)
+        && get(path).data.ageDeclaration == 'at_least_14'
+        && get(path).data.status == 'active';
+    }
+
+    function privateFieldUnchanged(field) {
+      return (!resource.data.keys().hasAny([field]) && !request.resource.data.keys().hasAny([field]))
+        || (resource.data.keys().hasAny([field])
+            && request.resource.data.keys().hasAny([field])
+            && request.resource.data[field] == resource.data[field]);
+    }
+
+    function privateLifecycleUnchanged() {
+      return privateFieldUnchanged('status')
+        && privateFieldUnchanged('deletionRequestedAt')
+        && privateFieldUnchanged('purgeAfter')
+        && privateFieldUnchanged('purgeStartedAt')
+        && privateFieldUnchanged('ageDeclaration')
+        && privateFieldUnchanged('ageDeclaredAt');
+    }
+
+    function privateKeysOk(data) {
+      return data.keys().hasOnly([
+        'email', 'updatedAt', 'status', 'deletionRequestedAt', 'purgeAfter',
+        'purgeStartedAt', 'ageDeclaration', 'ageDeclaredAt'
+      ]);
+    }
+
+    function emailOk(data) {
+      return !data.keys().hasAny(['email'])
+        || (data.email is string && data.email.size() > 0 && data.email.size() <= 320);
+    }
+
+    function declaresAdult() {
+      return request.resource.data.ageDeclaration == 'at_least_14'
+        && request.resource.data.ageDeclaredAt == request.time
+        && request.resource.data.status == 'active'
+        && !resource.data.keys().hasAny(['ageDeclaration', 'status', 'purgeStartedAt', 'deletionRequestedAt'])
+        && !request.resource.data.keys().hasAny(['deletionRequestedAt', 'purgeAfter', 'purgeStartedAt']);
+    }
+
+    function requestsDeletion() {
+      return resource.data.ageDeclaration == 'at_least_14'
+        && resource.data.status == 'active'
+        && !resource.data.keys().hasAny(['purgeStartedAt'])
+        && request.resource.data.status == 'pending_deletion'
+        && request.resource.data.deletionRequestedAt == request.time
+        && request.resource.data.purgeAfter >= request.time + duration.value(30, 'd') - duration.value(5, 'm')
+        && request.resource.data.purgeAfter <= request.time + duration.value(30, 'd') + duration.value(5, 'm')
+        && !request.resource.data.keys().hasAny(['purgeStartedAt'])
+        && privateFieldUnchanged('email')
+        && privateFieldUnchanged('ageDeclaration')
+        && privateFieldUnchanged('ageDeclaredAt');
+    }
+
+    function restoresAccount() {
+      return resource.data.status == 'pending_deletion'
+        && !resource.data.keys().hasAny(['purgeStartedAt'])
+        && request.resource.data.status == 'active'
+        && !request.resource.data.keys().hasAny(['deletionRequestedAt', 'purgeAfter', 'purgeStartedAt'])
+        && privateFieldUnchanged('email')
+        && privateFieldUnchanged('ageDeclaration')
+        && privateFieldUnchanged('ageDeclaredAt');
+    }
+
+    function publicProfileKeysOnly(data) {
+      return data.keys().hasOnly(['nickname', 'photoUrl', 'createdAt', 'updatedAt']);
+    }
+
+    // Account document. Email stays here. Only the signed-in owner can read it,
+    // including when the reader is not logged in or is a different user.
     match /users/{userId} {
-      allow read: if true;
-      allow create, update: if isOwner(userId);
+      allow read: if isOwner(userId);
+      allow create, update: if isOwner(userId)
+        && !request.resource.data.keys().hasAny(['email']);
       allow delete: if false;
 
-      match /data/{docId} {
-        allow read, write: if isOwner(userId);
+      match /private/{docId} {
+        allow read: if isOwner(userId);
+        allow create: if isRegisteredOwner(userId)
+          && docId == 'account'
+          && privateKeysOk(request.resource.data)
+          && emailOk(request.resource.data)
+          && !request.resource.data.keys().hasAny(['deletionRequestedAt', 'purgeAfter', 'purgeStartedAt'])
+          && (
+            request.resource.data.keys().hasOnly(['email', 'updatedAt'])
+            || (request.resource.data.ageDeclaration == 'at_least_14'
+                && request.resource.data.ageDeclaredAt == request.time
+                && request.resource.data.status == 'active')
+          );
+        allow update: if isRegisteredOwner(userId)
+          && docId == 'account'
+          && privateKeysOk(request.resource.data)
+          && emailOk(request.resource.data)
+          && privateFieldUnchanged('purgeStartedAt')
+          && (
+            privateLifecycleUnchanged()
+            || declaresAdult()
+            || requestsDeletion()
+            || restoresAccount()
+          );
+        allow delete: if false;
       }
+
+      match /data/{docId} {
+        allow read: if isOwner(userId);
+        allow write: if isRegisteredOwner(userId) && accountAllowsPublicWrite();
+      }
+    }
+
+    // Fields other people need for author labels. Email cannot be stored here.
+    match /public_profiles/{userId} {
+      allow read: if true;
+      allow create: if isOwner(userId)
+        && accountAllowsPublicWrite()
+        && publicProfileKeysOnly(request.resource.data)
+        && nicknameOk(request.resource.data)
+        && photoOk(request.resource.data);
+      allow update: if isOwner(userId)
+        && accountAllowsPublicWrite()
+        && publicProfileKeysOnly(request.resource.data)
+        && nicknameOk(request.resource.data)
+        && photoOk(request.resource.data)
+        && request.resource.data.diff(resource.data).affectedKeys()
+            .hasOnly(['nickname', 'photoUrl', 'updatedAt']);
+      allow delete: if false;
     }
 
     match /community_routines/{id} {
       allow read: if true;
-      allow create: if isSignedIn() && request.resource.data.authorId == request.auth.uid;
-      allow update: if isCommunityAuthor() || onlySocialUpdate();
-      allow delete: if isCommunityAuthor();
+      allow create: if isSignedIn()
+        && accountAllowsPublicWrite()
+        && request.resource.data.authorId == request.auth.uid;
+      allow update: if (isCommunityAuthor() && accountAllowsPublicWrite()) || onlySocialUpdate();
+      allow delete: if isCommunityAuthor() && accountAllowsPublicWrite();
     }
 
     match /community_showcase/{id} {
       allow read: if true;
-      allow create: if isSignedIn() && request.resource.data.authorId == request.auth.uid;
-      allow update: if isCommunityAuthor() || onlySocialUpdate();
-      allow delete: if isCommunityAuthor();
+      allow create: if isSignedIn()
+        && accountAllowsPublicWrite()
+        && request.resource.data.authorId == request.auth.uid;
+      allow update: if (isCommunityAuthor() && accountAllowsPublicWrite()) || onlySocialUpdate();
+      allow delete: if isCommunityAuthor() && accountAllowsPublicWrite();
+    }
+
+    match /deletion_jobs/{id} {
+      allow read, write: if false;
     }
 
     match /announcements/{id} {

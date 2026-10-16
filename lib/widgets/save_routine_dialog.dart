@@ -1,11 +1,11 @@
 import 'package:easy_localization/easy_localization.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:pointer_interceptor/pointer_interceptor.dart';
 
 import '../models/routine_category.dart';
 import '../theme/loopi_colors.dart';
 import 'category_filter_chips.dart';
+import 'youtube_safe_dialog.dart';
 
 String defaultRoutineName([DateTime? now]) {
   final date = now ?? DateTime.now();
@@ -35,18 +35,16 @@ Future<SaveRoutineDialogResult?> showSaveRoutineDialog(
   bool allowOverwrite = false,
   String? initialCategory,
 }) {
-  return showDialog<SaveRoutineDialogResult>(
+  return showYoutubeSafeDialog<SaveRoutineDialogResult>(
     context: context,
     barrierDismissible: false,
     useRootNavigator: true,
     builder: (dialogContext) {
-      return PointerInterceptor(
-        child: SaveRoutineDialog(
-          dialogContext: dialogContext,
-          initialName: initialName,
-          allowOverwrite: allowOverwrite,
-          initialCategory: initialCategory,
-        ),
+      return SaveRoutineDialog(
+        dialogContext: dialogContext,
+        initialName: initialName,
+        allowOverwrite: allowOverwrite,
+        initialCategory: initialCategory,
       );
     },
   );

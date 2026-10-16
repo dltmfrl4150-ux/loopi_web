@@ -4,6 +4,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:easy_localization/easy_localization.dart';
 import 'package:flutter/material.dart';
 
+import '../account/account_policy.dart';
 import '../models/class_models.dart';
 import '../models/community_models.dart';
 import '../models/routine_models.dart';
@@ -65,6 +66,12 @@ class _UserProfileScreenState extends State<UserProfileScreen> with SingleTicker
   bool _canDeleteAuthor(String authorId) {
     final uid = widget.userState.uid;
     return uid != null && uid.isNotEmpty && uid == authorId;
+  }
+
+  String get _authorLabel {
+    if (widget.authorId.startsWith('withdrawn_')) return AccountPolicy.withdrawnAuthorLabel;
+    final name = widget.authorName.trim();
+    return name.isEmpty ? AccountPolicy.withdrawnAuthorLabel : name;
   }
 
   int get _selectedCount => _selectedRoutineIds.length + _selectedShowcaseIds.length;
@@ -337,7 +344,7 @@ class _UserProfileScreenState extends State<UserProfileScreen> with SingleTicker
       child: Scaffold(
       backgroundColor: LoopiColors.canvas,
       appBar: AppBar(
-        title: Text('@${widget.authorName}'),
+        title: Text('@$_authorLabel'),
         leading: IconButton(
           icon: const Icon(Icons.arrow_back),
           onPressed: () {
@@ -367,7 +374,7 @@ class _UserProfileScreenState extends State<UserProfileScreen> with SingleTicker
                   radius: 28,
                   backgroundColor: LoopiColors.purple.withValues(alpha: 0.15),
                   child: Text(
-                    widget.authorName.isEmpty ? '?' : widget.authorName.substring(0, 1),
+                    _authorLabel.isEmpty ? '?' : _authorLabel.substring(0, 1),
                     style: const TextStyle(
                       color: LoopiColors.deepPurple,
                       fontWeight: FontWeight.w800,
@@ -381,7 +388,7 @@ class _UserProfileScreenState extends State<UserProfileScreen> with SingleTicker
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
-                        widget.authorName,
+                        _authorLabel,
                         style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 20),
                       ),
                       const SizedBox(height: 4),
@@ -410,8 +417,8 @@ class _UserProfileScreenState extends State<UserProfileScreen> with SingleTicker
             tabAlignment: TabAlignment.start,
             tabs: [
               Tab(text: 'community.tab_routines'.tr()),
-              Tab(text: 'community.tab_classes'.tr()),
               Tab(text: 'community.tab_showcase'.tr()),
+              Tab(text: 'community.tab_classes'.tr()),
             ],
           ),
           Expanded(
@@ -421,8 +428,8 @@ class _UserProfileScreenState extends State<UserProfileScreen> with SingleTicker
                     controller: _tabs,
                     children: [
                       _buildRoutinesTab(),
-                      _buildClassesTab(),
                       _buildShowcaseTab(crossAxisCount),
+                      _buildClassesTab(),
                     ],
                   ),
           ),

@@ -7,7 +7,6 @@ import 'package:easy_localization/easy_localization.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
-import 'package:pointer_interceptor/pointer_interceptor.dart';
 import 'package:record/record.dart';
 import 'package:video_player/video_player.dart';
 import 'package:youtube_player_iframe/youtube_player_iframe.dart';
@@ -28,6 +27,7 @@ import '../widgets/highlight_interval.dart';
 import '../widgets/shell_close_scope.dart';
 import '../widgets/comparison_export.dart';
 import '../widgets/storage_quota_nudge.dart';
+import '../widgets/youtube_safe_dialog.dart';
 import '../utils/storage_quota.dart';
 
 /// True when [path] looks like an audio-only capture (wav/m4a/…).
@@ -880,17 +880,15 @@ class _VideoPracticeScreenState extends State<VideoPracticeScreen> {
     // No camera + no mic → optional virtual session (still plays YouTube).
     if (!cameraAvailable && !microphoneAvailable) {
       if (!mounted) return;
-      final proceed = await showDialog<bool>(
+      final proceed = await showYoutubeSafeDialog<bool>(
         context: context,
-        builder: (dialogContext) => PointerInterceptor(
-          child: AlertDialog(
-            title: const Text('카메라, 마이크가 감지되지 않습니다'),
-            content: const Text('영상 재생만 하며 가상 녹화를 진행할까요?'),
-            actions: [
-              TextButton(onPressed: () => Navigator.pop(dialogContext, false), child: const Text('아니오')),
-              FilledButton(onPressed: () => Navigator.pop(dialogContext, true), child: const Text('네')),
-            ],
-          ),
+        builder: (dialogContext) => AlertDialog(
+          title: const Text('카메라, 마이크가 감지되지 않습니다'),
+          content: const Text('영상 재생만 하며 가상 녹화를 진행할까요?'),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(dialogContext, false), child: const Text('아니오')),
+            FilledButton(onPressed: () => Navigator.pop(dialogContext, true), child: const Text('네')),
+          ],
         ),
       );
       if (proceed == true) {
@@ -905,28 +903,26 @@ class _VideoPracticeScreenState extends State<VideoPracticeScreen> {
     if (!useCamera && microphoneAvailable && !knownMissingCamera && !_audioOnlyMode) {
       // Soft prompt once — cancel returns; confirm continues into shared start path.
       if (!mounted) return;
-      final proceed = await showDialog<bool>(
+      final proceed = await showYoutubeSafeDialog<bool>(
         context: context,
-        builder: (dialogContext) => PointerInterceptor(
-          child: AlertDialog(
-            title: const Text('카메라를 사용할 수 없습니다'),
-            content: Text(
-              _cameraError == null
-                  ? '카메라 없이 음성만 녹화할까요?'
-                  : '카메라 오류: $_cameraError\n\n음성만 녹화할까요?',
-            ),
-            actions: [
-              TextButton(onPressed: () => Navigator.pop(dialogContext, false), child: const Text('취소')),
-              TextButton(
-                onPressed: () {
-                  unawaited(_initCameraSafely());
-                  Navigator.pop(dialogContext, false);
-                },
-                child: const Text('카메라 재시도'),
-              ),
-              FilledButton(onPressed: () => Navigator.pop(dialogContext, true), child: const Text('음성만 녹화')),
-            ],
+        builder: (dialogContext) => AlertDialog(
+          title: const Text('카메라를 사용할 수 없습니다'),
+          content: Text(
+            _cameraError == null
+                ? '카메라 없이 음성만 녹화할까요?'
+                : '카메라 오류: $_cameraError\n\n음성만 녹화할까요?',
           ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(dialogContext, false), child: const Text('취소')),
+            TextButton(
+              onPressed: () {
+                unawaited(_initCameraSafely());
+                Navigator.pop(dialogContext, false);
+              },
+              child: const Text('카메라 재시도'),
+            ),
+            FilledButton(onPressed: () => Navigator.pop(dialogContext, true), child: const Text('음성만 녹화')),
+          ],
         ),
       );
       if (proceed != true) return;
@@ -2440,26 +2436,24 @@ class _VideoPracticeScreenState extends State<VideoPracticeScreen> {
     if (!mounted) return;
     setState(() => _isOverlayActive = true);
     try {
-      name = await showDialog<String>(
+      name = await showYoutubeSafeDialog<String>(
         context: context,
         barrierDismissible: false,
         useRootNavigator: true,
-        builder: (dialogContext) => PointerInterceptor(
-          child: AlertDialog(
-            title: const Text('연습 영상 저장'),
-            content: TextField(
-              controller: _saveNameController,
-              autofocus: true,
-              decoration: const InputDecoration(labelText: '파일 이름'),
-            ),
-            actions: [
-              TextButton(onPressed: () => Navigator.pop(dialogContext), child: const Text('취소')),
-              FilledButton(
-                onPressed: () => Navigator.pop(dialogContext, _saveNameController.text.trim()),
-                child: const Text('저장하기'),
-              ),
-            ],
+        builder: (dialogContext) => AlertDialog(
+          title: const Text('연습 영상 저장'),
+          content: TextField(
+            controller: _saveNameController,
+            autofocus: true,
+            decoration: const InputDecoration(labelText: '파일 이름'),
           ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(dialogContext), child: const Text('취소')),
+            FilledButton(
+              onPressed: () => Navigator.pop(dialogContext, _saveNameController.text.trim()),
+              child: const Text('저장하기'),
+            ),
+          ],
         ),
       );
     } catch (error, stack) {

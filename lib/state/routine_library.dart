@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -10,16 +11,22 @@ import '../services/database_service.dart';
 import '../utils/storage_quota.dart';
 
 /// Saved routine presets, backed by SharedPreferences and optionally Firestore.
+///
+/// Signed-out data uses a device scope. Each Firebase uid has its own keys.
+/// Logout clears memory only. Withdrawal removes that uid's keys and does not
+/// write an empty library back to Firestore.
 class RoutineLibrary extends ChangeNotifier {
-  static const String _routineStorageKey = 'loopi_saved_routines';
-  static const String _groupStorageKey = 'loopi_saved_groups';
-  static const String _practiceStorageKey = 'loopi_practice_results';
+  static const String _legacyRoutineKey = 'loopi_saved_routines';
+  static const String _legacyGroupKey = 'loopi_saved_groups';
+  static const String _legacyPracticeKey = 'loopi_practice_results';
+  static const String _legacyClaimedKey = 'loopi_legacy_library_claimed';
 
   RoutineLibrary({DatabaseService? database}) : _database = database ?? DatabaseService();
 
   final DatabaseService _database;
   String? _uid;
   bool _storageQuotaPending = false;
+  bool _skipCloudSync = false;
 
   final List<SavedRoutine> _routines = [];
   final List<RoutineGroup> _groups = [];
@@ -41,11 +48,37 @@ class RoutineLibrary extends ChangeNotifier {
   }
 
   Future<void> load() async {
-    final prefs = await SharedPreferences.getInstance();
-    final savedRoutines = prefs.getStringList(_routineStorageKey) ?? const <String>[];
-    final savedGroups = prefs.getStringList(_groupStorageKey) ?? const <String>[];
-    final savedPracticeResults = prefs.getStringList(_practiceStorageKey) ?? const <String>[];
+    await _loadScope(_uid);
+  }
 
+  ({String routines, String groups, String practice}) _keysFor(String? uid) {
+    if (uid == null || uid.isEmpty) {
+      return (
+        routines: 'loopi_saved_routines_device',
+        groups: 'loopi_saved_groups_device',
+        practice: 'loopi_practice_results_device',
+      );
+    }
+    return (
+      routines: 'loopi_saved_routines_u_$uid',
+      groups: 'loopi_saved_groups_u_$uid',
+      practice: 'loopi_practice_results_u_$uid',
+    );
+  }
+
+  Future<void> _loadScope(String? uid) async {
+    final prefs = await SharedPreferences.getInstance();
+    final keys = _keysFor(uid);
+    _replaceFromPrefs(
+      prefs.getStringList(keys.routines) ?? const <String>[],
+      prefs.getStringList(keys.groups) ?? const <String>[],
+      prefs.getStringList(keys.practice) ?? const <String>[],
+    );
+    notifyListeners();
+    unawaited(_persistLocal());
+  }
+
+  void _replaceFromPrefs(List<String> savedRoutines, List<String> savedGroups, List<String> savedPracticeResults) {
     _routines
       ..clear()
       ..addAll(
@@ -79,9 +112,6 @@ class RoutineLibrary extends ChangeNotifier {
               return PracticeResult.fromJson(json);
             }),
       );
-    notifyListeners();
-    // Migrate any legacy prefs that still contain base64/blob payloads.
-    unawaited(_persistLocal());
   }
 
   Map<String, dynamic>? _decodePrefsMap(String value) {
@@ -94,7 +124,12 @@ class RoutineLibrary extends ChangeNotifier {
   }
 
   Future<void> attachUser(String uid) async {
+    final switching = _uid != uid;
     _uid = uid;
+    if (switching) {
+      await _claimLegacyOnce(uid);
+      await _loadScope(uid);
+    }
     if (!FirebaseBootstrap.initialized) return;
     try {
       final cloud = await _database.fetchLibrary(uid);
@@ -122,8 +157,51 @@ class RoutineLibrary extends ChangeNotifier {
     }
   }
 
-  void detachUser() {
+  Future<void> _claimLegacyOnce(String uid) async {
+    final prefs = await SharedPreferences.getInstance();
+    if (prefs.getBool(_legacyClaimedKey) == true) return;
+    final keys = _keysFor(uid);
+    final uidHasData = (prefs.getStringList(keys.routines)?.isNotEmpty ?? false) ||
+        (prefs.getStringList(keys.groups)?.isNotEmpty ?? false) ||
+        (prefs.getStringList(keys.practice)?.isNotEmpty ?? false);
+    final legacyRoutines = prefs.getStringList(_legacyRoutineKey);
+    final legacyGroups = prefs.getStringList(_legacyGroupKey);
+    final legacyPractice = prefs.getStringList(_legacyPracticeKey);
+    final legacyHasData = (legacyRoutines?.isNotEmpty ?? false) ||
+        (legacyGroups?.isNotEmpty ?? false) ||
+        (legacyPractice?.isNotEmpty ?? false);
+    if (!uidHasData && legacyHasData) {
+      if (legacyRoutines != null) await prefs.setStringList(keys.routines, legacyRoutines);
+      if (legacyGroups != null) await prefs.setStringList(keys.groups, legacyGroups);
+      if (legacyPractice != null) await prefs.setStringList(keys.practice, legacyPractice);
+    }
+    await prefs.remove(_legacyRoutineKey);
+    await prefs.remove(_legacyGroupKey);
+    await prefs.remove(_legacyPracticeKey);
+    await prefs.setBool(_legacyClaimedKey, true);
+  }
+
+  /// Removes only [uid]'s local library. Does not sync an empty library upstream
+  /// and does not remove another uid's keys or the signed-out device keys.
+  Future<void> discardLocalAccountData(String uid) async {
+    if (uid.isEmpty) return;
+    final prefs = await SharedPreferences.getInstance();
+    final keys = _keysFor(uid);
+    await prefs.remove(keys.routines);
+    await prefs.remove(keys.groups);
+    await prefs.remove(keys.practice);
+    if (_uid != uid) return;
+    _skipCloudSync = true;
+    _routines.clear();
+    _groups.clear();
+    _practiceResults.clear();
+    notifyListeners();
+    _skipCloudSync = false;
+  }
+
+  Future<void> detachUser() async {
     _uid = null;
+    await _loadScope(null);
   }
 
   Future<void> _persist() async {
@@ -141,22 +219,23 @@ class RoutineLibrary extends ChangeNotifier {
     final practicePayload =
         _practiceResults.map((result) => jsonEncode(result.toLocalJson())).toList();
 
+    final keys = _keysFor(_uid);
     try {
-      await prefs.setStringList(_routineStorageKey, routinePayload);
-      await prefs.setStringList(_groupStorageKey, groupPayload);
-      await prefs.setStringList(_practiceStorageKey, practicePayload);
+      await prefs.setStringList(keys.routines, routinePayload);
+      await prefs.setStringList(keys.groups, groupPayload);
+      await prefs.setStringList(keys.practice, practicePayload);
     } catch (error) {
       debugPrint(
         '[LOOPI] SharedPreferences QuotaExceeded/persist failed: $error — '
         'rewriting metadata-only library',
       );
       try {
-        await prefs.remove(_routineStorageKey);
-        await prefs.remove(_groupStorageKey);
-        await prefs.remove(_practiceStorageKey);
-        await prefs.setStringList(_routineStorageKey, routinePayload);
-        await prefs.setStringList(_groupStorageKey, groupPayload);
-        await prefs.setStringList(_practiceStorageKey, practicePayload);
+        await prefs.remove(keys.routines);
+        await prefs.remove(keys.groups);
+        await prefs.remove(keys.practice);
+        await prefs.setStringList(keys.routines, routinePayload);
+        await prefs.setStringList(keys.groups, groupPayload);
+        await prefs.setStringList(keys.practice, practicePayload);
       } catch (retryError) {
         debugPrint('[LOOPI] SharedPreferences recovery failed: $retryError');
         _storageQuotaPending = true;
@@ -172,7 +251,17 @@ class RoutineLibrary extends ChangeNotifier {
     }
   }
 
+  bool get _isAnonymousFirebaseUser {
+    if (!FirebaseBootstrap.initialized) return false;
+    try {
+      return FirebaseAuth.instance.currentUser?.isAnonymous ?? false;
+    } catch (_) {
+      return false;
+    }
+  }
+
   Future<void> _syncCloud() async {
+    if (_skipCloudSync || _isAnonymousFirebaseUser) return;
     final uid = _uid;
     if (uid == null || !FirebaseBootstrap.initialized) return;
     await _database.saveLibrary(

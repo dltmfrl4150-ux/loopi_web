@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
@@ -13,6 +14,7 @@ import 'package:video_player/video_player.dart';
 import 'package:audioplayers/audioplayers.dart';
 
 import '../models/routine_models.dart';
+import '../services/auth_service.dart';
 import '../services/database_service.dart';
 import '../state/link_studio_session.dart';
 import '../state/routine_library.dart';
@@ -28,6 +30,7 @@ import '../widgets/highlight_interval.dart';
 import '../widgets/load_cached_routine_dialog.dart';
 import '../widgets/save_routine_dialog.dart';
 import '../widgets/storage_quota_nudge.dart';
+import '../widgets/youtube_safe_dialog.dart';
 import '../utils/storage_quota.dart';
 import 'practice_mode_screen.dart';
 
@@ -68,6 +71,7 @@ class LinkStudioScreen extends StatefulWidget {
     this.localFilePath,
     this.fileName,
     this.editingRoutine,
+    this.onGuestSignUp,
   });
 
   final RoutineLibrary library;
@@ -80,6 +84,9 @@ class LinkStudioScreen extends StatefulWidget {
   final String? localFilePath;
   final String? fileName;
   final SavedRoutine? editingRoutine;
+
+  /// Ends the anonymous session and returns to the login screen.
+  final Future<void> Function()? onGuestSignUp;
 
   bool get isEditMode => editingRoutine != null;
 
@@ -115,6 +122,8 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> {
   String _videoUrl = kDefaultVideoUrl;
   String _videoId = 'M7lc1UVf-VE';
   RangeValues? _rangeBeforeDrag;
+  /// Hides the live iframe while the member save dialog is open.
+  /// Kept until a browser session confirms the full-screen pointer interceptor.
   bool _saveDialogOpen = false;
 
   int _highlightedSection = 0;
@@ -1034,7 +1043,47 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> {
     }
   }
 
+  bool get _isGuestSession {
+    if (!FirebaseBootstrap.initialized) return true;
+    try {
+      final user = FirebaseAuth.instance.currentUser;
+      return user == null || user.isAnonymous;
+    } catch (_) {
+      return true;
+    }
+  }
+
+  Future<void> _showGuestSavePrompt() async {
+    final signUp = await showYoutubeSafeDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        content: const Text('루틴 저장 기능을 사용하기 위해서는 회원가입이 필요합니다.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('닫기'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('회원가입하기'),
+          ),
+        ],
+      ),
+    );
+    if (signUp != true || !mounted) return;
+    final signUpAction = widget.onGuestSignUp;
+    if (signUpAction != null) {
+      await signUpAction();
+      return;
+    }
+    await AuthService().signOut();
+  }
+
   Future<void> _onSavePressed() async {
+    if (_isGuestSession) {
+      await _showGuestSavePrompt();
+      return;
+    }
     if (_session.isTesting) {
       await _stopTestPlayback();
     }

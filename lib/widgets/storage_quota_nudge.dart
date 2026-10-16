@@ -1,10 +1,11 @@
 import 'package:flutter/material.dart';
 
 import '../utils/storage_quota.dart';
+import 'youtube_safe_dialog.dart';
 
 /// Shows the friendly local-storage-full nudge.
 Future<void> showStorageQuotaNudge(BuildContext context) {
-  return showDialog<void>(
+  return showYoutubeSafeDialog<void>(
     context: context,
     builder: (dialogContext) {
       return AlertDialog(

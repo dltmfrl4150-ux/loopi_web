@@ -2,12 +2,14 @@ import 'dart:async';
 import 'dart:developer' as developer;
 
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart';
 
 import '../models/cached_video.dart';
 import '../models/community_models.dart';
 import '../models/routine_category.dart';
 import '../models/routine_models.dart';
+import '../account/account_policy.dart';
 import '../utils/youtube_id.dart';
 import 'auth_service.dart';
 import 'storage_service.dart';
@@ -245,6 +247,156 @@ class DatabaseService {
     return db.collection('users').doc(uid);
   }
 
+  /// Nickname and photo only. World-readable. Never store email here.
+  DocumentReference<Map<String, dynamic>>? _publicProfileRef(String uid) {
+    final db = _db;
+    if (db == null || uid.isEmpty) return null;
+    return db.collection('public_profiles').doc(uid);
+  }
+
+  /// Email and other account fields. Owner-only in [firestore.rules].
+  DocumentReference<Map<String, dynamic>>? _privateAccountRef(String uid) {
+    final legacy = _userProfileRef(uid);
+    if (legacy == null) return null;
+    return legacy.collection('private').doc('account');
+  }
+
+  /// Firestore rules compare the path id to [request.auth.uid]. The client
+  /// must do the same and ignore a uid that was only passed in from the UI.
+  bool _writesOwnDocument(String uid) {
+    if (!FirebaseBootstrap.initialized || uid.isEmpty) return false;
+    try {
+      return FirebaseAuth.instance.currentUser?.uid == uid;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// True only when the signed-in Firebase user is anonymous and matches [uid].
+  bool _isAnonymousOwner(String uid) {
+    if (!_writesOwnDocument(uid)) return false;
+    try {
+      return FirebaseAuth.instance.currentUser?.isAnonymous ?? false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<PrivateAccountState> fetchPrivateAccount(String uid) async {
+    if (!_writesOwnDocument(uid)) {
+      return const PrivateAccountState(readFailed: true);
+    }
+    final ref = _privateAccountRef(uid);
+    if (ref == null) return const PrivateAccountState(readFailed: true);
+    try {
+      final snap = await ref.get();
+      if (!snap.exists) return const PrivateAccountState();
+      final data = snap.data() ?? const <String, dynamic>{};
+      final purgeAfter = data['purgeAfter'];
+      return PrivateAccountState(
+        exists: true,
+        status: data['status'] as String?,
+        ageDeclaration: data['ageDeclaration'] as String?,
+        purgeAfter: purgeAfter is Timestamp ? purgeAfter.toDate() : null,
+        purgeStarted: data['purgeStartedAt'] != null || data['status'] == AccountPolicy.purgeStarted,
+      );
+    } catch (error) {
+      debugPrint('fetchPrivateAccount error: $error');
+      return const PrivateAccountState(readFailed: true);
+    }
+  }
+
+  /// Records a self-declaration that the signed-in user is 14 or older.
+  /// This does not verify age or guardian consent.
+  Future<bool> declareAdult(String uid) async {
+    if (!_writesOwnDocument(uid)) return false;
+    final ref = _privateAccountRef(uid);
+    if (ref == null) return false;
+    try {
+      final current = await fetchPrivateAccount(uid);
+      if (current.hasAdultDeclaration && current.status == AccountPolicy.active) {
+        return true;
+      }
+      if (current.isPendingDeletion || current.isPurgeStarted) return false;
+      await ref.set({
+        'ageDeclaration': AccountPolicy.ageDeclarationAdult,
+        'ageDeclaredAt': FieldValue.serverTimestamp(),
+        'status': AccountPolicy.active,
+        'updatedAt': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
+      return true;
+    } catch (error) {
+      debugPrint('declareAdult error: $error');
+      return false;
+    }
+  }
+
+  Future<DeletionRequestDecision> requestAccountDeletion(String uid) async {
+    if (!_writesOwnDocument(uid)) return DeletionRequestDecision.notEligible;
+    final ref = _privateAccountRef(uid);
+    final db = _db;
+    if (ref == null || db == null) return DeletionRequestDecision.notEligible;
+    try {
+      return await db.runTransaction((tx) async {
+        final snap = await tx.get(ref);
+        final data = snap.data() ?? const <String, dynamic>{};
+        final purgeAfter = data['purgeAfter'];
+        final account = PrivateAccountState(
+          exists: snap.exists,
+          status: data['status'] as String?,
+          ageDeclaration: data['ageDeclaration'] as String?,
+          purgeAfter: purgeAfter is Timestamp ? purgeAfter.toDate() : null,
+          purgeStarted: data['purgeStartedAt'] != null || data['status'] == AccountPolicy.purgeStarted,
+        );
+        final decision = AccountPolicy.deletionRequest(account);
+        if (decision != DeletionRequestDecision.create) return decision;
+        tx.set(ref, {
+          'status': AccountPolicy.pendingDeletion,
+          'deletionRequestedAt': FieldValue.serverTimestamp(),
+          'purgeAfter': Timestamp.fromDate(DateTime.now().toUtc().add(AccountPolicy.purgeDelay)),
+          'updatedAt': FieldValue.serverTimestamp(),
+        }, SetOptions(merge: true));
+        return DeletionRequestDecision.create;
+      });
+    } catch (error) {
+      debugPrint('requestAccountDeletion error: $error');
+      return DeletionRequestDecision.notEligible;
+    }
+  }
+
+  Future<RestoreDecision> restoreAccount(String uid) async {
+    if (!_writesOwnDocument(uid)) return RestoreDecision.notPending;
+    final ref = _privateAccountRef(uid);
+    final db = _db;
+    if (ref == null || db == null) return RestoreDecision.notPending;
+    try {
+      return await db.runTransaction((tx) async {
+        final snap = await tx.get(ref);
+        final data = snap.data() ?? const <String, dynamic>{};
+        final purgeAfter = data['purgeAfter'];
+        final account = PrivateAccountState(
+          exists: snap.exists,
+          status: data['status'] as String?,
+          ageDeclaration: data['ageDeclaration'] as String?,
+          purgeAfter: purgeAfter is Timestamp ? purgeAfter.toDate() : null,
+          purgeStarted: data['purgeStartedAt'] != null || data['status'] == AccountPolicy.purgeStarted,
+        );
+        final decision = AccountPolicy.restore(account);
+        if (decision != RestoreDecision.allow) return decision;
+        tx.set(ref, {
+          'status': AccountPolicy.active,
+          'deletionRequestedAt': FieldValue.delete(),
+          'purgeAfter': FieldValue.delete(),
+          'updatedAt': FieldValue.serverTimestamp(),
+        }, SetOptions(merge: true));
+        return RestoreDecision.allow;
+      });
+    } catch (error) {
+      debugPrint('restoreAccount error: $error');
+      return RestoreDecision.notPending;
+    }
+  }
+
   DocumentReference<Map<String, dynamic>>? _libraryRef(String uid) {
     final db = _db;
     if (db == null || uid.isEmpty) return null;
@@ -364,48 +516,67 @@ class DatabaseService {
         : (authDisplayName != null && authDisplayName.trim().isNotEmpty)
             ? authDisplayName.trim()
             : '루피 유저';
-    final ref = _userProfileRef(uid);
-    if (ref == null) return fallback;
+    if (_isAnonymousOwner(uid)) return fallback;
+    final publicRef = _publicProfileRef(uid);
+    if (publicRef == null) return fallback;
+    if (!_writesOwnDocument(uid)) {
+      debugPrint('ensureUserProfile ignored: uid does not match the signed-in user');
+      return fallback;
+    }
     try {
-      final snap = await ref.get();
-      if (snap.exists) {
-        final data = snap.data() ?? {};
-        final existing = (data['nickname'] as String?)?.trim();
-        if (existing != null && existing.isNotEmpty) {
-          userProfileCache[uid] = existing;
-          final photo = (data['photoUrl'] as String?)?.trim();
-          if (photo != null && photo.isNotEmpty) userPhotoCache[uid] = photo;
-          return existing;
-        }
-        await ref.set({
-          'nickname': fallback,
-          if (email != null) 'email': email,
+      final legacyRef = _userProfileRef(uid);
+      final legacySnap = legacyRef == null ? null : await legacyRef.get();
+      final legacy = legacySnap?.data() ?? const <String, dynamic>{};
+      final storedEmail = _nonEmptyString(email) ?? _nonEmptyString(legacy['email']);
+      if (storedEmail != null) {
+        await _privateAccountRef(uid)?.set({
+          'email': storedEmail,
           'updatedAt': FieldValue.serverTimestamp(),
         }, SetOptions(merge: true));
-        userProfileCache[uid] = fallback;
-        return fallback;
       }
-      await ref.set({
-        'nickname': fallback,
-        'email': email ?? '',
-        'createdAt': FieldValue.serverTimestamp(),
-        'updatedAt': FieldValue.serverTimestamp(),
-      });
-      userProfileCache[uid] = fallback;
-      return fallback;
+      if (legacySnap != null && legacySnap.exists && legacy.containsKey('email')) {
+        await legacyRef!.update({'email': FieldValue.delete()});
+      }
+
+      final publicSnap = await publicRef.get();
+      final public = publicSnap.data() ?? const <String, dynamic>{};
+      final nickname = _nonEmptyString(public['nickname']) ??
+          _nonEmptyString(legacy['nickname']) ??
+          fallback;
+      final photo = _nonEmptyString(public['photoUrl']) ?? _nonEmptyString(legacy['photoUrl']);
+      final publicMissingName = _nonEmptyString(public['nickname']) == null;
+      if (!publicSnap.exists || publicMissingName) {
+        await publicRef.set({
+          'nickname': nickname,
+          if (photo != null) 'photoUrl': photo,
+          if (!publicSnap.exists) 'createdAt': FieldValue.serverTimestamp(),
+          'updatedAt': FieldValue.serverTimestamp(),
+        }, SetOptions(merge: true));
+      }
+      userProfileCache[uid] = nickname;
+      if (photo != null) userPhotoCache[uid] = photo;
+      return nickname;
     } catch (error) {
       debugPrint('ensureUserProfile error: $error');
       return fallback;
     }
   }
 
+  String? _nonEmptyString(Object? value) {
+    if (value is! String) return null;
+    final trimmed = value.trim();
+    if (trimmed.isEmpty) return null;
+    return trimmed;
+  }
+
   Future<String?> fetchUserNickname(String uid) async {
-    final ref = _userProfileRef(uid);
+    final ref = _publicProfileRef(uid);
     if (ref == null) return null;
     try {
       final snap = await ref.get();
-      final nickname = (snap.data()?['nickname'] as String?)?.trim();
-      if (nickname == null || nickname.isEmpty) return null;
+      final nickname = _nonEmptyString(snap.data()?['nickname']);
+      if (nickname == null) return null;
+      userProfileCache[uid] = nickname;
       return nickname;
     } catch (error) {
       debugPrint('fetchUserNickname error: $error');
@@ -419,7 +590,11 @@ class DatabaseService {
   }) async {
     final trimmed = nickname.trim();
     if (trimmed.isEmpty || uid.isEmpty) return false;
-    final ref = _userProfileRef(uid);
+    if (!_writesOwnDocument(uid)) {
+      debugPrint('updateUserNickname ignored: uid does not match the signed-in user');
+      return false;
+    }
+    final ref = _publicProfileRef(uid);
     if (ref == null) return false;
     try {
       await ref.set({
@@ -442,7 +617,11 @@ class DatabaseService {
   }) async {
     final trimmed = photoUrl.trim();
     if (trimmed.isEmpty || uid.isEmpty) return false;
-    final ref = _userProfileRef(uid);
+    if (!_writesOwnDocument(uid)) {
+      debugPrint('updateUserPhotoUrl ignored: uid does not match the signed-in user');
+      return false;
+    }
+    final ref = _publicProfileRef(uid);
     if (ref == null) return false;
     try {
       await ref.set({
@@ -464,7 +643,7 @@ class DatabaseService {
   Future<String?> fetchUserPhotoUrl(String uid) async {
     final cached = userPhotoCache[uid];
     if (cached != null && cached.isNotEmpty) return cached;
-    final ref = _userProfileRef(uid);
+    final ref = _publicProfileRef(uid);
     if (ref == null) return null;
     try {
       final snap = await ref.get();
@@ -982,13 +1161,14 @@ class DatabaseService {
     _logProfileSync(
       'sharePracticeToShowcase start result=${result.id} kind=$kind audioFlag=${result.isAudioRecording} path=${result.recordedPath} bytes=${result.recordedDataBytes?.length ?? 0}',
     );
-    final uploadedUrl = await StorageService.uploadPracticeRecording(
+    final uploaded = await StorageService.uploadPracticeRecording(
       userId: authorId,
       resultId: result.id,
       path: result.recordedPath,
       bytes: result.recordedDataBytes,
       audio: kind == ShowcaseMediaKind.audio,
     );
+    final uploadedUrl = uploaded?.url;
     if (!isRemotePlayableUrl(uploadedUrl)) {
       _logProfileSync(
         'sharePracticeToShowcase aborted: missing Storage downloadURL (permission, blob read, or Firebase init). path=${result.recordedPath} uploaded=$uploadedUrl',
@@ -1034,6 +1214,7 @@ class DatabaseService {
         'authorNickname': authorName,
         'videoUrl': recordedUrl,
         'recordedPath': recordedUrl,
+        if (uploaded?.storagePath != null) 'storagePath': uploaded!.storagePath,
         if (authorPhoto != null && authorPhoto.isNotEmpty) 'authorPhotoUrl': authorPhoto,
       });
       userProfileCache[authorId] = authorName;
@@ -1399,8 +1580,21 @@ class DatabaseService {
       final ref = col.doc(itemId);
       final snap = await ref.get().timeout(_queryTimeout);
       if (!snap.exists) return false;
-      final authorId = _docAuthorId(snap.data() ?? {});
+      final data = snap.data() ?? {};
+      final authorId = _docAuthorId(data);
       if (authorId != requesterId) return false;
+      final objectPath = ownedShowcaseStoragePath(
+        ownerUid: requesterId,
+        storagePath: data['storagePath'] as String?,
+        downloadUrl: (data['videoUrl'] ?? data['recordedPath']) as String?,
+      );
+      if (objectPath != null) {
+        final removed = await StorageService.deleteOwnedObject(
+          userId: requesterId,
+          objectPath: objectPath,
+        );
+        if (!removed) return false;
+      }
       await ref.delete();
       return true;
     } catch (error, stack) {

@@ -124,6 +124,21 @@ class AuthService {
     }
   }
 
+  Future<bool> deleteCurrentUser() async {
+    final user = currentUser;
+    if (user == null) return false;
+    try {
+      await user.delete();
+      return true;
+    } on FirebaseAuthException catch (error) {
+      debugPrint('AuthService.deleteCurrentUser error: ${error.code}');
+      return false;
+    } catch (error) {
+      debugPrint('AuthService.deleteCurrentUser error: $error');
+      return false;
+    }
+  }
+
   Future<void> signOut() async {
     final auth = _auth;
     if (auth == null) return;
