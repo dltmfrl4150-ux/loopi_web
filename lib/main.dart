@@ -1,7 +1,9 @@
 import 'package:firebase_core/firebase_core.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:easy_localization/easy_localization.dart';
+import 'package:flutter_web_plugins/url_strategy.dart';
 
 import 'firebase_options.dart';
 import 'screens/auth_gate.dart';
@@ -11,9 +13,16 @@ import 'state/routine_library.dart';
 import 'state/user_state.dart';
 import 'theme/loopi_colors.dart';
 import 'utils/app_locale.dart';
+import 'utils/routine_share_pending.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  if (kIsWeb) {
+    usePathUrlStrategy();
+  }
+  // Capture `/r/{id}` from the address bar before auth UI can remount or
+  // rewrite history. Uri.base alone is not reliable on Flutter web.
+  RoutineSharePending.captureFromBrowser();
   await EasyLocalization.ensureInitialized();
   // Wear / native remote channel (no-op on web until a plugin is present).
   PlayerRemoteChannelBridge.startListening();

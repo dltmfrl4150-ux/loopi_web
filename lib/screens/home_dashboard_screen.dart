@@ -14,6 +14,8 @@ import '../state/user_state.dart';
 import '../theme/loopi_colors.dart';
 import '../utils/instant_player_route.dart';
 import '../utils/media_limits.dart';
+import '../utils/routine_share_location.dart';
+import '../utils/routine_share_pending.dart';
 import '../utils/time_format.dart';
 import '../utils/youtube_id.dart';
 import '../widgets/app_logo.dart';
@@ -87,11 +89,61 @@ class _HomeDashboardScreenState extends State<HomeDashboardScreen> {
   final CommunityFeedStore _communityFeed = CommunityFeedStore();
   final DatabaseService _database = DatabaseService();
   final ValueNotifier<int> _communityRefreshTick = ValueNotifier<int>(0);
+  bool _shareLinkBusy = false;
+  bool _shareLinkOpened = false;
+  String? _shareLinkError;
 
   @override
   void initState() {
     super.initState();
     widget.library.addListener(_onLibraryChanged);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      unawaited(_openSharedRoutineIfNeeded());
+    });
+  }
+
+  Future<void> _openSharedRoutineIfNeeded() async {
+    if (_shareLinkBusy || _shareLinkOpened || !mounted) return;
+    final postId = RoutineSharePending.resolve();
+    if (postId == null) return;
+
+    setState(() {
+      _shareLinkBusy = true;
+      _shareLinkError = null;
+    });
+    setCommunityRoutineSharePath(postId);
+
+    final lookup = await _database.lookupCommunityRoutineById(postId);
+    if (!mounted) return;
+
+    if (lookup.status == CommunityRoutineLookupStatus.found && lookup.post != null) {
+      final post = lookup.post!;
+      setState(() {
+        _shareLinkBusy = false;
+        _shareLinkOpened = true;
+        _shareLinkError = null;
+      });
+      _openRoutinePlayer(post.routine, communityPostId: post.id);
+      return;
+    }
+
+    final message = switch (lookup.status) {
+      CommunityRoutineLookupStatus.denied => 'player.share_denied'.tr(),
+      CommunityRoutineLookupStatus.failed => 'player.share_load_failed'.tr(),
+      CommunityRoutineLookupStatus.missing ||
+      CommunityRoutineLookupStatus.found =>
+        'player.share_not_found'.tr(),
+    };
+    setState(() {
+      _shareLinkBusy = false;
+      _shareLinkError = message;
+    });
+  }
+
+  void _dismissShareLinkError() {
+    RoutineSharePending.clear();
+    clearCommunityRoutineSharePath();
+    setState(() => _shareLinkError = null);
   }
 
   void _onLibraryChanged() {
@@ -324,12 +376,13 @@ class _HomeDashboardScreenState extends State<HomeDashboardScreen> {
     setState(() => _shellPage = null);
   }
 
-  void _openRoutinePlayer(SavedRoutine routine) {
+  void _openRoutinePlayer(SavedRoutine routine, {String? communityPostId}) {
     Navigator.of(context).push(
       instantPlayerRoute(
         RoutinePlayerScreen(
           routine: routine,
           library: widget.library,
+          communityPostId: communityPostId,
           onOpenInShell: _openInShell,
         ),
       ),
@@ -358,7 +411,9 @@ class _HomeDashboardScreenState extends State<HomeDashboardScreen> {
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
 
-    return Scaffold(
+    return Stack(
+      children: [
+        Scaffold(
       appBar: _shellPage != null
           ? null
           : AppBar(
@@ -468,6 +523,49 @@ class _HomeDashboardScreenState extends State<HomeDashboardScreen> {
         ),
         ],
       ),
+        ),
+        if (_shareLinkBusy)
+          const Positioned.fill(
+            child: ColoredBox(
+              color: Color(0x99000000),
+              child: Center(
+                child: CircularProgressIndicator(color: Colors.white),
+              ),
+            ),
+          ),
+        if (_shareLinkError != null)
+          Positioned.fill(
+            child: ColoredBox(
+              color: const Color(0x99000000),
+              child: Center(
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 420),
+                  child: Material(
+                    color: Theme.of(context).colorScheme.surface,
+                    borderRadius: BorderRadius.circular(16),
+                    child: Padding(
+                      padding: const EdgeInsets.all(24),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            _shareLinkError!,
+                            textAlign: TextAlign.center,
+                          ),
+                          const SizedBox(height: 16),
+                          FilledButton(
+                            onPressed: _dismissShareLinkError,
+                            child: Text('common.close'.tr()),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+      ],
     );
   }
 

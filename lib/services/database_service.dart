@@ -38,6 +38,27 @@ class RoutinesPage {
   final DocumentSnapshot<Map<String, dynamic>>? cursor;
 }
 
+enum CommunityRoutineLookupStatus { found, missing, denied, failed }
+
+class CommunityRoutineLookup {
+  const CommunityRoutineLookup._(this.status, this.post);
+
+  const CommunityRoutineLookup.found(CommunityRoutinePost post)
+      : this._(CommunityRoutineLookupStatus.found, post);
+
+  const CommunityRoutineLookup.missing()
+      : this._(CommunityRoutineLookupStatus.missing, null);
+
+  const CommunityRoutineLookup.denied()
+      : this._(CommunityRoutineLookupStatus.denied, null);
+
+  const CommunityRoutineLookup.failed()
+      : this._(CommunityRoutineLookupStatus.failed, null);
+
+  final CommunityRoutineLookupStatus status;
+  final CommunityRoutinePost? post;
+}
+
 /// Latest home-screen notice from the `announcements` collection.
 class AppAnnouncement {
   const AppAnnouncement({
@@ -1534,6 +1555,45 @@ class DatabaseService {
       category: category,
     );
     return page.posts;
+  }
+
+  /// Loads one public community routine by Firestore document id.
+  Future<CommunityRoutinePost?> fetchCommunityRoutineById(String postId) async {
+    final result = await lookupCommunityRoutineById(postId);
+    return result.post;
+  }
+
+  /// Same as [fetchCommunityRoutineById] but keeps missing vs denied vs failed.
+  Future<CommunityRoutineLookup> lookupCommunityRoutineById(String postId) async {
+    final id = postId.trim();
+    if (id.isEmpty) {
+      return const CommunityRoutineLookup.missing();
+    }
+    final col = _routinesCol;
+    if (col == null) {
+      for (final post in _localRoutines) {
+        if (post.id == id) return CommunityRoutineLookup.found(post);
+      }
+      return const CommunityRoutineLookup.missing();
+    }
+    try {
+      final snap = await col.doc(id).get().timeout(_queryTimeout);
+      if (!snap.exists) return const CommunityRoutineLookup.missing();
+      final data = Map<String, dynamic>.from(snap.data() ?? const <String, dynamic>{});
+      data['id'] = snap.id;
+      final resolved = _docAuthorId(data);
+      if (resolved.isNotEmpty) data['authorId'] = resolved;
+      return CommunityRoutineLookup.found(CommunityRoutinePost.fromJson(data));
+    } on FirebaseException catch (error, stack) {
+      _logProfileSync('lookupCommunityRoutineById($id)', error, stack);
+      if (error.code == 'permission-denied') {
+        return const CommunityRoutineLookup.denied();
+      }
+      return const CommunityRoutineLookup.failed();
+    } catch (error, stack) {
+      _logProfileSync('lookupCommunityRoutineById($id)', error, stack);
+      return const CommunityRoutineLookup.failed();
+    }
   }
 
   Future<bool> deleteCommunityRoutine({

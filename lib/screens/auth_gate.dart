@@ -26,7 +26,7 @@ class AuthGate extends StatefulWidget {
   State<AuthGate> createState() => _AuthGateState();
 }
 
-enum _AccountHold { none, age, pending, blocked, unread }
+enum _AccountHold { none, pending, blocked, unread }
 
 class _AuthGateState extends State<AuthGate> {
   final AuthService _auth = AuthService();
@@ -75,16 +75,8 @@ class _AuthGateState extends State<AuthGate> {
       });
       return;
     }
-    if (requiresAgeDeclaration(
-      isAnonymous: user.isAnonymous,
-      hasAdultDeclaration: account.hasAdultDeclaration,
-    )) {
-      setState(() {
-        _hold = _AccountHold.age;
-        _loadingLibrary = false;
-      });
-      return;
-    }
+    // Age self-declaration is not part of login. Guests and members enter home
+    // after purge / pending-deletion checks. declareAdult is not called here.
     await _enterHome(user);
   }
 
@@ -105,30 +97,6 @@ class _AuthGateState extends State<AuthGate> {
       _hold = _AccountHold.none;
       _loadingLibrary = false;
     });
-  }
-
-  Future<void> _declareAdult(User user) async {
-    final ok = await _database.declareAdult(user.uid);
-    if (!mounted) return;
-    if (!ok) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('profile.age_failed'.tr())),
-      );
-      return;
-    }
-    setState(() => _loadingLibrary = true);
-    await _enterHome(user);
-  }
-
-  Future<void> _stopUnder14(User user) async {
-    if (_auth.currentUser?.uid == user.uid) {
-      await _auth.deleteCurrentUser();
-    }
-    await _signOut();
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('profile.age_under_result'.tr())),
-    );
   }
 
   Future<void> _restore(User user) async {
@@ -240,13 +208,6 @@ class _AuthGateState extends State<AuthGate> {
           return const _AuthLoadingScreen();
         }
 
-        if (_hold == _AccountHold.age) {
-          return AgeDeclarationScreen(
-            onAdult: () => _declareAdult(user),
-            onUnder14: () => _stopUnder14(user),
-            onSignOut: _signOut,
-          );
-        }
         if (_hold == _AccountHold.pending || _hold == _AccountHold.blocked) {
           return AccountRecoveryScreen(
             purgeStarted: _hold == _AccountHold.blocked,

@@ -21,10 +21,11 @@ import '../state/routine_library.dart';
 import '../theme/loopi_colors.dart';
 import '../utils/cached_video.dart';
 import '../utils/instant_player_route.dart';
+import '../utils/media_blob.dart';
+import '../utils/studio_preview_clock.dart';
 import '../utils/time_format.dart';
 import '../utils/youtube_id.dart';
 import '../utils/youtube_player_factory.dart';
-import '../utils/media_blob.dart';
 import '../widgets/app_logo.dart';
 import '../widgets/highlight_interval.dart';
 import '../widgets/load_cached_routine_dialog.dart';
@@ -119,6 +120,12 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> {
   bool _isSeeking = false;
   bool _isAdvancing = false;
   DateTime? _ignoreUntil;
+  /// Wall-clock fallback while Studio preview runs (YouTube currentTime can stall).
+  double _testClockStartSec = 0;
+  double _testClockSpeed = 1;
+  double _testLastReportedSec = 0;
+  DateTime? _testLastReportedAt;
+  DateTime? _testPlayAnchorAt;
   String _videoUrl = kDefaultVideoUrl;
   String _videoId = 'M7lc1UVf-VE';
   RangeValues? _rangeBeforeDrag;
@@ -368,7 +375,127 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> {
   }
 
   void _onVideoState(YoutubeVideoState state) {
-    _syncSectionHighlight(state.position.inMilliseconds / 1000.0);
+    final reported = state.position.inMilliseconds / 1000.0;
+    _syncSectionHighlight(reported);
+    if (!_session.isTesting || _isSeeking || _isAdvancing) return;
+    final segment = _session.testSegment;
+    final time = _projectTestTime(reported);
+    final reached = studioPreviewReachedEnd(
+      time: time,
+      startSec: segment.startSec,
+      endSec: segment.endSec,
+    );
+    if (reached || (time - segment.endSec).abs() < 0.5) {
+      _studioPreviewLog(
+        'onVideoState reported=$reported projected=$time '
+        'start=${segment.startSec} end=${segment.endSec} reached=$reached',
+      );
+    }
+    _onTime(time, segment.startSec, segment.endSec);
+  }
+
+  void _studioPreviewLog(String message) {
+    debugPrint('[STUDIO_PREVIEW] $message');
+  }
+
+  void _armTestClock({required double startSec, required double speed}) {
+    final now = DateTime.now();
+    _testClockStartSec = startSec;
+    _testClockSpeed = speed <= 0 ? 1.0 : speed;
+    _testLastReportedSec = startSec;
+    _testLastReportedAt = now;
+    _testPlayAnchorAt = now;
+    _studioPreviewLog(
+      'clock armed start=$startSec speed=$_testClockSpeed at=$now source=${_session.sourceType.name}',
+    );
+  }
+
+  void _clearTestClock() {
+    _testPlayAnchorAt = null;
+    _testLastReportedAt = null;
+  }
+
+  double _projectTestTime(double reported) {
+    final now = DateTime.now();
+    final projected = projectStudioPreviewTime(
+      reportedSec: reported,
+      startSec: _testClockStartSec,
+      speed: _testClockSpeed,
+      lastReportedSec: _testLastReportedSec,
+      lastReportedAt: _testLastReportedAt,
+      anchorSec: _testClockStartSec,
+      anchorAt: _testPlayAnchorAt,
+      now: now,
+    );
+    if (reported >= _testClockStartSec - 0.05) {
+      _testLastReportedSec = reported;
+      _testLastReportedAt = now;
+    }
+    return projected;
+  }
+
+  /// End watch must not await iframe `currentTime` — that Future can stall on
+  /// web and then wall-clock projection never runs (root cause of End miss).
+  void _startPreviewEndMonitor({
+    required int sessionId,
+    required double startSec,
+    required double endSec,
+  }) {
+    _playbackMonitorTimer?.cancel();
+    _studioPreviewLog(
+      'end monitor start session=$sessionId startSec=$startSec endSec=$endSec unit=seconds',
+    );
+    _playbackMonitorTimer = Timer.periodic(const Duration(milliseconds: 50), (timer) {
+      if (_routineSessionId != sessionId || !_session.isTesting || !mounted) {
+        _studioPreviewLog(
+          'end monitor stop sessionMismatch=${_routineSessionId != sessionId} '
+          'testing=${_session.isTesting} mounted=$mounted',
+        );
+        timer.cancel();
+        return;
+      }
+      if (_isSeeking || _isAdvancing || _testPlayAnchorAt == null) return;
+
+      final projected = _projectTestTime(_testLastReportedSec);
+      final reached = studioPreviewReachedEnd(
+        time: projected,
+        startSec: startSec,
+        endSec: endSec,
+      );
+      if (reached) {
+        _studioPreviewLog(
+          'end reached projected=$projected lastReported=$_testLastReportedSec '
+          'start=$startSec end=$endSec → advance',
+        );
+        _onTime(projected, startSec, endSec);
+      }
+    });
+    unawaited(_samplePreviewPlayerTime(sessionId));
+  }
+
+  Future<void> _samplePreviewPlayerTime(int sessionId) async {
+    var loggedTimeout = false;
+    while (_routineSessionId == sessionId && _session.isTesting && mounted) {
+      try {
+        // Soft timeout: keep last sample; wall-clock End monitor does not depend on this.
+        final reported = await _getCurrentTime().timeout(
+          const Duration(milliseconds: 250),
+          onTimeout: () => _testLastReportedSec,
+        );
+        if (_routineSessionId != sessionId || !_session.isTesting) return;
+        if (reported >= _testClockStartSec - 0.05) {
+          _testLastReportedSec = reported;
+          _testLastReportedAt = DateTime.now();
+        }
+      } catch (_) {
+        // Ignore iframe interop failures; do not setState (avoids CanvasKit thrash).
+        if (!loggedTimeout) {
+          loggedTimeout = true;
+          _studioPreviewLog('currentTime sample skipped (timeout/error); using wall clock');
+        }
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 300));
+    }
   }
 
   void _syncSectionHighlight(double time) {
@@ -705,11 +832,13 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> {
     _routineTimer?.cancel();
     _loopPlaybackTimer?.cancel();
     _playbackMonitorTimer?.cancel();
-    
+    _isSeeking = false;
+    _isAdvancing = false;
+
     _session.selectSegment(index);
-    final segment = _session.segments[index];
-    _applySpeed(segment.speed);
-    _seekTo(segment.startSec, force: true);
+    // Start~End preview: reuse existing beginTest + End monitor (same path as 루틴재생).
+    _session.beginTest(startIndex: index);
+    await _jumpToSegment(index);
   }
 
   Future<void> _onAddSectionPressed() async {
@@ -815,6 +944,7 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> {
 
   Future<void> _toggleTestPlayback() async {
     if (_session.isTesting) {
+      _studioPreviewLog('toggle → stop');
       await _stopTestPlayback();
       return;
     }
@@ -834,6 +964,13 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> {
 
     final activeIndex = _session.selectedIndex.clamp(0, _session.segments.length - 1);
     _session.selectSegment(activeIndex);
+    final segment = _session.segments[activeIndex];
+    _studioPreviewLog(
+      'toggle → start index=$activeIndex '
+      'startSec=${segment.startSec} endSec=${segment.endSec} '
+      'speed=${segment.speed} loop=${segment.loopCount} '
+      'source=${_session.sourceType.name} unit=seconds',
+    );
     _session.beginTest(startIndex: activeIndex);
     await _jumpToSegment(activeIndex);
   }
@@ -855,10 +992,15 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> {
     final double speed = segment.speed;
     final int delaySec = segment.delaySec;
 
+    _studioPreviewLog(
+      'jumpToSegment session=$currentSession startSec=$startSec endSec=$endSec '
+      'speed=$speed delaySec=$delaySec source=${_session.sourceType.name}',
+    );
 
-    debugPrint('[SEGMENT] start=$startSec end=$endSec');
-
-    if (endSec <= startSec) return;
+    if (endSec <= startSec) {
+      _studioPreviewLog('jump aborted: endSec <= startSec');
+      return;
+    }
 
     _ignoreUntil = DateTime.now().add(const Duration(milliseconds: 500));
     _isSeeking = true;
@@ -877,8 +1019,12 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> {
           await _seekTo(startSec, force: true);
           await Future<void>.delayed(waitDuration);
           _isSeeking = false;
-          if (!_youtubeAlive) return;
-          await _yt(() => _youtubePlayer.playVideo());
+          if (!_youtubeAlive) {
+            _studioPreviewLog('youtube not alive after seek — arming monitor anyway');
+          } else {
+            await _yt(() => _youtubePlayer.playVideo());
+            _studioPreviewLog('youtube playVideo issued at startSec=$startSec');
+          }
           break;
         case SourceType.localVideo:
           await _videoPlayer?.setPlaybackSpeed(speed);
@@ -895,44 +1041,92 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> {
           await _audioPlayer?.resume();
           break;
       }
-    } catch (_) {
+      _armTestClock(startSec: startSec, speed: speed);
+      _ignoreUntil = DateTime.now().add(const Duration(milliseconds: 280));
+    } catch (error) {
       _isSeeking = false;
+      _studioPreviewLog('jumpToSegment play error: $error');
     }
 
-    _playbackMonitorTimer = Timer.periodic(const Duration(milliseconds: 120), (timer) async {
-      if (_routineSessionId != currentSession || !_session.isTesting || !mounted) {
-        timer.cancel();
-        return;
-      }
-
-      if (_isSeeking || _isAdvancing) return;
-
-      try {
-        final time = await _getCurrentTime();
-        _onTime(time, startSec, endSec);
-      } catch (_) {}
-    });
+    if (_routineSessionId == currentSession && _session.isTesting && mounted) {
+      _startPreviewEndMonitor(
+        sessionId: currentSession,
+        startSec: startSec,
+        endSec: endSec,
+      );
+    } else {
+      _studioPreviewLog(
+        'end monitor NOT armed after jump '
+        'sessionOk=${_routineSessionId == currentSession} testing=${_session.isTesting}',
+      );
+    }
   }
 
   void _onTime(double time, double startSec, double endSec) {
-    if (_isSeeking || _isAdvancing) return;
-    if (_ignoreUntil != null && DateTime.now().isBefore(_ignoreUntil!)) return;
+    if (_isSeeking || _isAdvancing) {
+      _studioPreviewLog(
+        'onTime ignored seeking=$_isSeeking advancing=$_isAdvancing time=$time',
+      );
+      return;
+    }
+    if (_ignoreUntil != null && DateTime.now().isBefore(_ignoreUntil!)) {
+      return;
+    }
 
-    if (time < startSec - 0.1) return;
-    if (time + 0.12 < endSec) return;
+    if (!studioPreviewReachedEnd(time: time, startSec: startSec, endSec: endSec)) {
+      return;
+    }
 
+    _studioPreviewLog(
+      'onTime End hit time=$time start=$startSec end=$endSec → advanceLoopSegment',
+    );
     unawaited(_advanceLoopSegment());
   }
+
   Future<void> _advanceLoopSegment() async {
-    if (_isAdvancing) return;
+    if (_isAdvancing) {
+      _studioPreviewLog('advanceLoopSegment skipped (already advancing)');
+      return;
+    }
     _isAdvancing = true;
+    _playbackMonitorTimer?.cancel();
+    _playbackMonitorTimer = null;
 
     try {
-      if (!_session.isTesting || !mounted) return;
+      if (!_session.isTesting || !mounted) {
+        _studioPreviewLog(
+          'advanceLoopSegment aborted testing=${_session.isTesting} mounted=$mounted',
+        );
+        return;
+      }
+
+      // Pause at End before looping / finishing so the source cannot run to EOF.
+      double? beforePause;
+      try {
+        beforePause = await _getCurrentTime().timeout(
+          const Duration(milliseconds: 250),
+          onTimeout: () => -1,
+        );
+      } catch (_) {}
+      _studioPreviewLog('pause command issuing posBefore=$beforePause');
+      try {
+        await _pause();
+        _studioPreviewLog('pause command completed');
+      } catch (error) {
+        _studioPreviewLog('pause command FAILED: $error');
+      }
+      try {
+        final afterPause = await _getCurrentTime().timeout(
+          const Duration(milliseconds: 250),
+          onTimeout: () => -1,
+        );
+        _studioPreviewLog('pos after pause=$afterPause');
+      } catch (_) {}
 
       final segment = _session.testSegment;
       final delaySec = segment.delaySec;
       final result = _session.onLoopHit();
+      _studioPreviewLog('onLoopHit result=$result delaySec=$delaySec');
 
       switch (result) {
         case LoopHitResult.seekToStart:
@@ -966,7 +1160,6 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> {
   }
 
   Future<void> _replayCurrent() async {
-    _ignoreUntil = DateTime.now().add(const Duration(milliseconds: 280));
     if (_inWidgetTest) return;
     _isSeeking = true;
 
@@ -1002,7 +1195,24 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> {
           await _audioPlayer?.resume();
           break;
       }
-    } catch (_) {}
+      final segment = _session.testSegment;
+      _armTestClock(startSec: segment.startSec, speed: segment.speed);
+      _ignoreUntil = DateTime.now().add(const Duration(milliseconds: 280));
+      if (_session.isTesting && mounted && _playbackMonitorTimer == null) {
+        _startPreviewEndMonitor(
+          sessionId: _routineSessionId,
+          startSec: segment.startSec,
+          endSec: segment.endSec,
+        );
+      } else {
+        _studioPreviewLog(
+          'replayCurrent monitor skip testing=${_session.isTesting} '
+          'timerNull=${_playbackMonitorTimer == null}',
+        );
+      }
+    } catch (error) {
+      _studioPreviewLog('replayCurrent error: $error');
+    }
   }
 
   Future<void> _waitDelay(int delaySec) async {
@@ -1021,6 +1231,7 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> {
   }
 
   Future<void> _stopTestPlayback() async {
+    _studioPreviewLog('stopTestPlayback session→${_routineSessionId + 1}');
     _routineSessionId++;
     _delayTimer?.cancel();
     _delayTimer = null;
@@ -1030,6 +1241,7 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> {
     _routineTimer = null;
     _playbackMonitorTimer?.cancel();
     _playbackMonitorTimer = null;
+    _clearTestClock();
     _isSeeking = false;
     _isAdvancing = false;
     _session.stopTest();
@@ -1039,7 +1251,10 @@ class _LinkStudioScreenState extends State<LinkStudioScreen> {
         await _pause();
         await _applySpeed(_session.active.speed);
         await _seekTo(_session.active.startSec, force: true);
-      } catch (_) {}
+        _studioPreviewLog('stopTestPlayback paused+seeked to ${_session.active.startSec}');
+      } catch (error) {
+        _studioPreviewLog('stopTestPlayback cleanup error: $error');
+      }
     }
   }
 

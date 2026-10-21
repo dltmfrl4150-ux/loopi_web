@@ -39,7 +39,7 @@ class CommunityScreen extends StatefulWidget {
 
   final RoutineLibrary library;
   final UserSubscriptionState userState;
-  final ValueChanged<SavedRoutine>? onPlayRoutine;
+  final void Function(SavedRoutine routine, {String? communityPostId})? onPlayRoutine;
 
   /// Bump this after a successful community share to force a reload.
   final ValueListenable<int>? refreshTick;
@@ -280,14 +280,18 @@ class CommunityScreenState extends State<CommunityScreen> with SingleTickerProvi
     unawaited(widget.library.setFavorite(post.routine.id, !favorited));
   }
 
-  void _openRoutine(SavedRoutine routine) {
+  void _openRoutine(CommunityRoutinePost post) {
     if (widget.onPlayRoutine != null) {
-      widget.onPlayRoutine!(routine);
+      widget.onPlayRoutine!(post.routine, communityPostId: post.id);
       return;
     }
     Navigator.of(context).push(
       instantPlayerRoute(
-        RoutinePlayerScreen(routine: routine, library: widget.library),
+        RoutinePlayerScreen(
+          routine: post.routine,
+          library: widget.library,
+          communityPostId: post.id,
+        ),
       ),
     );
   }
@@ -393,7 +397,7 @@ class CommunityScreenState extends State<CommunityScreen> with SingleTickerProvi
                 uid: _uid,
                 onRefresh: _loadRoutines,
                 onLoadMore: _loadMoreRoutines,
-                onOpen: (post) => _openRoutine(post.routine),
+                onOpen: _openRoutine,
                 onToggleFavorite: _toggleFavorite,
                 onOpenAuthor: (post) => _openAuthor(
                   authorId: post.authorId,

@@ -7,7 +7,6 @@ import 'package:flutter/material.dart';
 import '../account/account_policy.dart';
 import '../models/class_models.dart';
 import '../models/community_models.dart';
-import '../models/routine_models.dart';
 import '../services/class_catalog.dart';
 import '../services/database_service.dart';
 import '../state/routine_library.dart';
@@ -164,10 +163,14 @@ class _UserProfileScreenState extends State<UserProfileScreen> with SingleTicker
     });
   }
 
-  void _openRoutine(SavedRoutine routine) {
+  void _openRoutine(CommunityRoutinePost post) {
     Navigator.of(context).push(
       instantPlayerRoute(
-        RoutinePlayerScreen(routine: routine, library: widget.library),
+        RoutinePlayerScreen(
+          routine: post.routine,
+          library: widget.library,
+          communityPostId: post.id,
+        ),
       ),
     );
   }
@@ -505,7 +508,7 @@ class _UserProfileScreenState extends State<UserProfileScreen> with SingleTicker
                 child: Card(
                   margin: const EdgeInsets.only(bottom: 10),
                   child: ListTile(
-                    onTap: () => _openRoutine(post.routine),
+                    onTap: () => _openRoutine(post),
                     leading: _routineThumb(post),
                     title: Text(post.routine.name, maxLines: 1, overflow: TextOverflow.ellipsis),
                     subtitle: Text(
@@ -554,7 +557,7 @@ class _UserProfileScreenState extends State<UserProfileScreen> with SingleTicker
               child: ListTile(
                 onTap: _selecting
                     ? () => _toggleRoutineSelected(post.id)
-                    : () => _openRoutine(post.routine),
+                    : () => _openRoutine(post),
                 leading: _selecting
                     ? Checkbox(
                         value: selected,

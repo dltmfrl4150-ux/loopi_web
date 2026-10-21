@@ -226,7 +226,14 @@
     "forward_5s": "5초 앞으로",
     "next_segment": "다음 구간",
     "audio_only_mode": "오디오 전용 모드",
-    "audio_only_hint": "카메라 없이 목소리만 녹음합니다"
+    "audio_only_hint": "카메라 없이 목소리만 녹음합니다",
+    "copy_link": "링크 복사",
+    "link_copied": "링크가 복사되었습니다",
+    "link_copy_failed": "링크를 복사하지 못했습니다. 다시 시도해 주세요.",
+    "share_not_found": "이 루틴을 찾을 수 없습니다. 삭제되었거나 잘못된 링크일 수 있습니다.",
+    "share_denied": "이 루틴을 볼 권한이 없습니다.",
+    "share_load_failed": "루틴을 불러오지 못했습니다. 네트워크 상태를 확인한 뒤 다시 시도해 주세요.",
+    "share_loading": "공유 루틴을 불러오는 중…"
   },
   "settings": {
     "title": "설정",

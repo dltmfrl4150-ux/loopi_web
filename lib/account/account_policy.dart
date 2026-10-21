@@ -28,18 +28,18 @@ class PrivateAccountState {
   bool get hasAdultDeclaration =>
       ageDeclaration == AccountPolicy.ageDeclarationAdult;
 
-  /// Home, publishing, and cloud library writes stay closed until this is true.
+  /// Home access after auth. Age self-declaration is not a login gate.
   bool get allowsAppUse =>
-      !readFailed && hasAdultDeclaration && !isPendingDeletion && !isPurgeStarted;
+      !readFailed && !isPendingDeletion && !isPurgeStarted;
 }
 
-/// Anonymous guests skip the age screen. Signed-in members still declare age.
+/// Login no longer shows the age self-declaration screen for guests or members.
+/// [ageDeclaration] may still exist on private/account for other account flows.
 bool requiresAgeDeclaration({
   required bool isAnonymous,
   required bool hasAdultDeclaration,
 }) {
-  if (isAnonymous) return false;
-  return !hasAdultDeclaration;
+  return false;
 }
 
 enum DeletionRequestDecision {

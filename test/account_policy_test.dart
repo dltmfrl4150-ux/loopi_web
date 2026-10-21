@@ -4,14 +4,14 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:loopi_web/state/routine_library.dart';
 
 void main() {
-  test('anonymous guests skip age declaration and members do not', () {
+  test('login does not require the age self-declaration screen', () {
     expect(
       requiresAgeDeclaration(isAnonymous: true, hasAdultDeclaration: false),
       isFalse,
     );
     expect(
       requiresAgeDeclaration(isAnonymous: false, hasAdultDeclaration: false),
-      isTrue,
+      isFalse,
     );
     expect(
       requiresAgeDeclaration(isAnonymous: false, hasAdultDeclaration: true),

@@ -226,7 +226,14 @@
     "forward_5s": "Forward 5s",
     "next_segment": "Next Segment",
     "audio_only_mode": "Audio-only mode",
-    "audio_only_hint": "No camera — recording your voice"
+    "audio_only_hint": "No camera — recording your voice",
+    "copy_link": "Copy link",
+    "link_copied": "Link copied",
+    "link_copy_failed": "Could not copy the link. Please try again.",
+    "share_not_found": "This routine could not be found. It may have been deleted or the link is invalid.",
+    "share_denied": "You do not have permission to view this routine.",
+    "share_load_failed": "Could not load this routine. Check your connection and try again.",
+    "share_loading": "Loading shared routine…"
   },
   "settings": {
     "title": "Settings",
