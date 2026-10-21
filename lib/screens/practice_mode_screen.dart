@@ -3,6 +3,7 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:youtube_player_iframe/youtube_player_iframe.dart';
@@ -15,6 +16,7 @@ import '../models/routine_models.dart';
 import '../services/player_remote_control.dart';
 import '../state/routine_library.dart';
 import '../theme/loopi_colors.dart';
+import '../utils/browser_fullscreen.dart';
 import '../utils/cached_video.dart';
 import '../utils/time_format.dart';
 import '../utils/media_blob.dart';
@@ -100,6 +102,25 @@ class PracticeModeScreenState extends State<PracticeModeScreen>
   bool _disposing = false;
   /// Cached media length so section.endSec past EOF (Shorts) still advances.
   double? _cachedMediaDurationSec;
+  final TransformationController _transformationController = TransformationController();
+  /// In-app fullscreen: video fills the body; controls overlay. Not cleared on segment change.
+  bool _isFullscreen = false;
+
+  void _toggleFullscreen() {
+    setState(() {
+      _isFullscreen = !_isFullscreen;
+    });
+
+    if (kIsWeb) {
+      if (_isFullscreen) {
+        // 브라우저 전체화면 진입 (OS 레벨에서 탭, 주소창 모두 숨김)
+        requestBrowserFullscreen();
+      } else {
+        // 브라우저 전체화면 해제
+        exitBrowserFullscreen();
+      }
+    }
+  }
 
   bool get _youtubeAlive => !_disposing && _youtubeInitialized && mounted;
 
@@ -1438,6 +1459,15 @@ class PracticeModeScreenState extends State<PracticeModeScreen>
                 icon: const Icon(Icons.skip_next_rounded),
                 color: Colors.white,
               ),
+            IconButton(
+              onPressed: _toggleFullscreen,
+              iconSize: iconSize,
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+              icon: Icon(_isFullscreen ? Icons.fullscreen_exit : Icons.fullscreen),
+              color: Colors.white,
+              tooltip: _isFullscreen ? '전체화면 종료' : '전체화면',
+            ),
           ],
         ),
       );
@@ -1496,9 +1526,30 @@ class PracticeModeScreenState extends State<PracticeModeScreen>
                   icon: const Icon(Icons.skip_next_rounded),
                   color: Colors.white,
                 ),
+              IconButton(
+                onPressed: _toggleFullscreen,
+                icon: Icon(_isFullscreen ? Icons.fullscreen_exit : Icons.fullscreen),
+                tooltip: _isFullscreen ? '전체화면 종료' : '전체화면',
+                color: Colors.white,
+              ),
             ],
           ),
         ],
+      ),
+    );
+  }
+
+  Widget _fullscreenCornerButton() {
+    return PointerInterceptor(
+      child: Material(
+        color: Colors.black.withValues(alpha: 0.45),
+        shape: const CircleBorder(),
+        child: IconButton(
+          onPressed: _toggleFullscreen,
+          color: Colors.white,
+          tooltip: _isFullscreen ? '전체화면 종료' : '전체화면',
+          icon: Icon(_isFullscreen ? Icons.fullscreen_exit : Icons.fullscreen),
+        ),
       ),
     );
   }
@@ -1526,6 +1577,7 @@ class PracticeModeScreenState extends State<PracticeModeScreen>
     } catch (_) {}
     _audioPlayer?.dispose();
     revokeMediaBlobUrl(_mediaObjectUrl);
+    _transformationController.dispose();
     super.dispose();
   }
 
@@ -1718,19 +1770,69 @@ class PracticeModeScreenState extends State<PracticeModeScreen>
   }
 
   Widget _mediaStage(Widget mediaWidget) {
+    // 모바일 기기(iOS, Android)와 데스크톱 웹을 구분하기 위한 변수
+    final bool isDesktopWeb = kIsWeb &&
+        (defaultTargetPlatform == TargetPlatform.windows ||
+            defaultTargetPlatform == TargetPlatform.macOS ||
+            defaultTargetPlatform == TargetPlatform.linux);
+
     return Center(
-      child: AspectRatio(
-        aspectRatio: _playerAspectRatio > 0 ? _playerAspectRatio : 16 / 9,
-        child: Stack(
-          fit: StackFit.expand,
-          children: [
-            Transform.flip(
+      child: Listener(
+        onPointerSignal: (pointerSignal) {
+          if (pointerSignal is PointerScrollEvent) {
+            final dy = pointerSignal.scrollDelta.dy;
+            if (dy == 0) return;
+
+            // Zoom in if scrolling up, out if scrolling down
+            final double scaleChange = dy < 0 ? 1.1 : 0.9;
+            final Matrix4 matrix = _transformationController.value.clone();
+            final double currentScale = matrix.getMaxScaleOnAxis();
+
+            // Clamp the scale bounds (1.0 to 4.0)
+            final double targetScale = (currentScale * scaleChange).clamp(1.0, 4.0);
+            final double actualScaleChange = targetScale / currentScale;
+
+            if (actualScaleChange == 1.0) return;
+
+            final Offset focalPoint = pointerSignal.localPosition;
+
+            // Scale relative to the exact mouse pointer position
+            matrix.translate(focalPoint.dx, focalPoint.dy);
+            matrix.scale(actualScaleChange, actualScaleChange, 1.0);
+            matrix.translate(-focalPoint.dx, -focalPoint.dy);
+
+            _transformationController.value = matrix;
+          }
+        },
+        child: InteractiveViewer(
+          transformationController: _transformationController,
+          minScale: 1.0,
+          maxScale: 4.0,
+          // Allow free panning
+          panEnabled: true,
+          scaleEnabled: true,
+          child: AspectRatio(
+            aspectRatio: _playerAspectRatio > 0 ? _playerAspectRatio : 16 / 9,
+            child: Transform.flip(
               flipX: _currentRoutine.isMirroredOn &&
                   _currentRoutine.sourceType != SourceType.audio,
-              child: mediaWidget,
+              child: isDesktopWeb
+                  ? Stack(
+                      fit: StackFit.expand,
+                      children: [
+                        mediaWidget,
+                        // 데스크톱 웹 환경: 유튜브 iframe 마우스 스크롤 가로채기 방지용 방패막
+                        PointerInterceptor(
+                          child: GestureDetector(
+                            behavior: HitTestBehavior.opaque,
+                            child: const SizedBox.expand(),
+                          ),
+                        ),
+                      ],
+                    )
+                  : mediaWidget, // 모바일 웹 환경: 방패막 없이 순정 터치 줌 활성화
             ),
-            _fiveSecondSeekOverlay(),
-          ],
+          ),
         ),
       ),
     );
@@ -1765,6 +1867,80 @@ class PracticeModeScreenState extends State<PracticeModeScreen>
     );
   }
 
+  /// In-app fullscreen: media fills the body; controls overlay at the bottom.
+  Widget _buildFullscreenPlayerBody(Widget mediaWidget) {
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        Positioned.fill(child: _mediaStage(mediaWidget)),
+        if (_countdown > 0)
+          Align(
+            alignment: Alignment.topCenter,
+            child: _countdownBanner(compact: true),
+          ),
+        Positioned(
+          top: 0,
+          right: 0,
+          child: SafeArea(
+            child: Padding(
+              padding: const EdgeInsets.all(8),
+              child: _fullscreenCornerButton(),
+            ),
+          ),
+        ),
+        Align(
+          alignment: Alignment.bottomCenter,
+          child: PointerInterceptor(
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topCenter,
+                  end: Alignment.bottomCenter,
+                  colors: [
+                    Colors.transparent,
+                    Colors.black.withValues(alpha: 0.55),
+                    Colors.black.withValues(alpha: 0.9),
+                  ],
+                  stops: const [0.0, 0.4, 1.0],
+                ),
+              ),
+              child: SafeArea(
+                top: false,
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(8, 28, 8, 4),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        '${sectionLabelForIndex(_segmentIndex)}  '
+                        '${formatMmSs(_segment.startSec)} - ${formatMmSs(_segment.endSec)}  '
+                        '${formatSpeedLabel(_segment.speed)}  ${formatLoopLabel(_segment.loopCount)}',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          color: Colors.white.withValues(alpha: 0.85),
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      const SizedBox(height: 6),
+                      SizedBox(
+                        height: 52,
+                        child: _intervalButtons(compact: true),
+                      ),
+                      _playerControls(),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
   /// Portrait / desktop: unchanged vertical stack.
   Widget _buildPortraitPlayerBody(Widget mediaWidget) {
     return LayoutBuilder(
@@ -1782,18 +1958,27 @@ class PracticeModeScreenState extends State<PracticeModeScreen>
         return Column(
           children: [
             _countdownBanner(),
+            // Use the same InteractiveViewer stage as landscape — portrait
+            // previously called `_flippedMedia` only, so zoom/pan never attached.
             Expanded(
-              child: Center(
-                child: ConstrainedBox(
-                  constraints: BoxConstraints(
-                    maxWidth: constraints.maxWidth,
-                    maxHeight: constraints.maxHeight,
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  Center(
+                    child: ConstrainedBox(
+                      constraints: BoxConstraints(
+                        maxWidth: constraints.maxWidth,
+                        maxHeight: constraints.maxHeight,
+                      ),
+                      child: _mediaStage(mediaWidget),
+                    ),
                   ),
-                  child: AspectRatio(
-                    aspectRatio: _playerAspectRatio,
-                    child: _flippedMedia(mediaWidget),
+                  Positioned(
+                    top: 8,
+                    right: 8,
+                    child: _fullscreenCornerButton(),
                   ),
-                ),
+                ],
               ),
             ),
             SizedBox(
@@ -1841,6 +2026,11 @@ class PracticeModeScreenState extends State<PracticeModeScreen>
                   alignment: Alignment.topCenter,
                   child: _countdownBanner(compact: true),
                 ),
+              Positioned(
+                top: 8,
+                right: 8,
+                child: _fullscreenCornerButton(),
+              ),
               Positioned(
                 left: 8,
                 right: 8,
@@ -1897,9 +2087,11 @@ class PracticeModeScreenState extends State<PracticeModeScreen>
 
   Widget _buildMainScaffold({required Widget mediaWidget}) {
     final isLandscape = _isLowHeightViewport;
-    final content = isLandscape
-        ? _buildLandscapePlayerBody(mediaWidget)
-        : _buildPortraitPlayerBody(mediaWidget);
+    final content = _isFullscreen
+        ? _buildFullscreenPlayerBody(mediaWidget)
+        : (isLandscape
+            ? _buildLandscapePlayerBody(mediaWidget)
+            : _buildPortraitPlayerBody(mediaWidget));
 
     return Theme(
       data: ThemeData(
@@ -1914,48 +2106,50 @@ class PracticeModeScreenState extends State<PracticeModeScreen>
           ? ColoredBox(color: const Color(0xFF120F1C), child: content)
           : Scaffold(
               backgroundColor: const Color(0xFF120F1C),
-              appBar: AppBar(
-                toolbarHeight: isLandscape ? 36 : kToolbarHeight,
-                backgroundColor: isLandscape
-                    ? Colors.black.withValues(alpha: 0.45)
-                    : Colors.transparent,
-                foregroundColor: Colors.white,
-                titleSpacing: isLandscape ? 8 : null,
-                title: Row(
-                  children: [
-                    if (!isLandscape) ...[
-                      const AppLogo(height: 28),
-                      const SizedBox(width: 12),
-                    ],
-                    Expanded(
-                      child: Text(
-                        _currentRoutine.name,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(fontSize: isLandscape ? 14 : 20),
-                      ),
-                    ),
-                  ],
-                ),
-                actions: [
-                  if (widget.library != null)
-                    FavoriteButton(
-                      initialValue: _libraryRoutine.isFavorite,
-                      onChanged: (value) async {
-                        await widget.library!.setFavorite(_currentRoutine.id, value);
-                        if (!mounted) return;
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          SnackBar(
-                            content: Text(
-                              value
-                                  ? 'common.favorite_added'.tr()
-                                  : 'common.favorite_removed'.tr(),
+              appBar: _isFullscreen
+                  ? null
+                  : AppBar(
+                      toolbarHeight: isLandscape ? 36 : kToolbarHeight,
+                      backgroundColor: isLandscape
+                          ? Colors.black.withValues(alpha: 0.45)
+                          : Colors.transparent,
+                      foregroundColor: Colors.white,
+                      titleSpacing: isLandscape ? 8 : null,
+                      title: Row(
+                        children: [
+                          if (!isLandscape) ...[
+                            const AppLogo(height: 28),
+                            const SizedBox(width: 12),
+                          ],
+                          Expanded(
+                            child: Text(
+                              _currentRoutine.name,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(fontSize: isLandscape ? 14 : 20),
                             ),
                           ),
-                        );
-                      },
+                        ],
+                      ),
+                      actions: [
+                        if (widget.library != null)
+                          FavoriteButton(
+                            initialValue: _libraryRoutine.isFavorite,
+                            onChanged: (value) async {
+                              await widget.library!.setFavorite(_currentRoutine.id, value);
+                              if (!mounted) return;
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(
+                                  content: Text(
+                                    value
+                                        ? 'common.favorite_added'.tr()
+                                        : 'common.favorite_removed'.tr(),
+                                  ),
+                                ),
+                              );
+                            },
+                          ),
+                      ],
                     ),
-                ],
-              ),
               body: content,
             ),
     );

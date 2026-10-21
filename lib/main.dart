@@ -14,6 +14,7 @@ import 'state/user_state.dart';
 import 'theme/loopi_colors.dart';
 import 'utils/app_locale.dart';
 import 'utils/routine_share_pending.dart';
+import 'utils/routine_share_url.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -110,7 +111,37 @@ class _LoopiAppState extends State<LoopiApp> {
         ),
       ),
       themeMode: ThemeMode.system,
-      home: AuthGate(library: _library, userState: _userState),
+      // Do not set `home` together with `onGenerateInitialRoutes` (assertion).
+      // Path URL strategy opens `/r/{id}` as the engine initial route; the
+      // default generator would try `/` → `/r` → `/r/{id}` and fail on `/r`.
+      // Serve a single AuthGate for `/` and deep links; share id → HomeDashboard.
+      onGenerateInitialRoutes: (initialRoute) {
+        _captureShareIdFromRouteName(initialRoute);
+        return [
+          MaterialPageRoute<void>(
+            settings: RouteSettings(name: _normalizeRouteName(initialRoute)),
+            builder: (_) => AuthGate(library: _library, userState: _userState),
+          ),
+        ];
+      },
+      onGenerateRoute: (settings) {
+        final name = settings.name ?? '/';
+        _captureShareIdFromRouteName(name);
+        return MaterialPageRoute<void>(
+          settings: settings,
+          builder: (_) => AuthGate(library: _library, userState: _userState),
+        );
+      },
     );
+  }
+}
+
+String _normalizeRouteName(String name) =>
+    name.startsWith('/') ? name : '/$name';
+
+void _captureShareIdFromRouteName(String name) {
+  final id = parseCommunityRoutineShareId(Uri.parse(_normalizeRouteName(name)));
+  if (id != null) {
+    RoutineSharePending.capture(id);
   }
 }
